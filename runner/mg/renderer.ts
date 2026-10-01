@@ -35,6 +35,9 @@ const remotionBundleOptions = (publicDir: string) => ({
   publicDir,
   webpackOverride: (config: any) => ({
     ...config,
+    // Each clip gets a temporary public directory. Persisted webpack caches
+    // are not reusable across those bundles and can leave the build waiting.
+    cache: false,
     resolve: {
       ...(config.resolve ?? {}),
       modules: [path.join(MODULE_ROOT, "node_modules"), path.join(PROJECT_ROOT, "node_modules"), ...(config.resolve?.modules ?? ["node_modules"])],
@@ -315,15 +318,20 @@ export async function renderVisualTagTemplateClip(
   };
   const publicDir = await fs.mkdtemp(path.join(process.env.TEMP ?? process.env.TMP ?? ".", "story-claw-mg-clip-"));
   try {
+    console.log(`[MG渲染] ${instanceKey} 准备素材`);
     await preparePublicAssets(input, novelPaths.episodeDir(sel.novelName, sel.episode), publicDir);
+    console.log(`[MG渲染] ${instanceKey} 打包模板`);
     const serveUrl = await bundle(remotionBundleOptions(publicDir));
+    console.log(`[MG渲染] ${instanceKey} 选择合成`);
     const composition = await selectComposition({serveUrl, id: "StoryClawMgEpisode", inputProps: {episode: input}});
     await fs.mkdir(path.dirname(outputPath), {recursive: true});
     const nextPath = `${outputPath}.next${path.extname(outputPath)}`;
     await fs.rm(nextPath, {force: true});
+    console.log(`[MG渲染] ${instanceKey} 渲染 ${durationFrames} 帧`);
     await renderMedia({
       composition,
       serveUrl,
+      concurrency: 1,
       codec: isAlpha ? "prores" : "h264",
       muted: false,
       outputLocation: nextPath,
@@ -341,11 +349,24 @@ export async function renderVisualTagTemplateClip(
         }),
       logLevel: "warn",
     });
+    console.log(`[MG渲染] ${instanceKey} 校验帧数`);
     await assertMgVideoFrames(nextPath, durationFrames, fps);
+    console.log(`[MG渲染] ${instanceKey} 发布片段`);
     await fs.rm(outputPath, {force: true});
     await fs.rename(nextPath, outputPath);
   } finally {
-    await fs.rm(publicDir, {recursive: true, force: true});
+    if (process.platform === "win32") {
+      // Remotion/webpack may retain Windows file handles until process exit;
+      // awaiting recursive removal here can hang after the clip is complete.
+      console.warn(`[MG渲染] Windows 临时素材目录待进程退出后清理: ${publicDir}`);
+    } else {
+      try {
+        await fs.rm(publicDir, {recursive: true, force: true, maxRetries: 8, retryDelay: 250});
+      } catch (error) {
+        console.warn(`[MG渲染] 临时素材清理失败，保留目录 ${publicDir}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    console.log(`[MG渲染] ${instanceKey} 收尾完成`);
   }
 }
 
@@ -357,6 +378,141 @@ const persistentNodeKeys = new Set([
   "endFrame",
   "zIndex",
 ]);
+
+type GlobalFrameWindow = {startFrame: number; endFrame: number};
+type CompositionSlot = {slotId: string; openFrame: number; closeFrame: number};
+type CompositionSlotProvider = {
+  resolveCompositionSlots(input: {
+    htmlTag: string;
+    spec: unknown;
+    fps: number;
+    durationFrames: number;
+  }): readonly CompositionSlot[];
+};
+
+const intersectGlobalWindows = (
+  left: readonly GlobalFrameWindow[],
+  right: readonly GlobalFrameWindow[],
+): GlobalFrameWindow[] => {
+  const result: GlobalFrameWindow[] = [];
+  for (const a of left) {
+    for (const b of right) {
+      const startFrame = Math.max(a.startFrame, b.startFrame);
+      const endFrame = Math.min(a.endFrame, b.endFrame);
+      if (endFrame > startFrame) result.push({startFrame, endFrame});
+    }
+  }
+  return result.sort((a, b) => a.startFrame - b.startFrame || a.endFrame - b.endFrame);
+};
+
+const compositionSlotsFor = (
+  parent: MgRuntimeCompositionNode,
+  record: VisualFunctionRecord,
+  fps: number,
+): readonly CompositionSlot[] => {
+  const resolved = mgProvider.resolveCall({name: record.name, arguments: record.arguments});
+  const provider = mgProvider as unknown as Partial<CompositionSlotProvider>;
+  if (typeof provider.resolveCompositionSlots !== "function") {
+    throw new Error("MG Template Pack 不支持 composition slots，请更新模板包");
+  }
+  return provider.resolveCompositionSlots({
+    htmlTag: record.htmlTag,
+    spec: resolved.render.spec,
+    fps,
+    durationFrames: Math.max(1, parent.endFrame - parent.startFrame),
+  });
+};
+
+/**
+ * Apply template-owned readiness windows to descendants without teaching the
+ * compositor about any concrete template name. Direct children are assigned
+ * by their timeline position; template `order` is only an instance identity.
+ * Deeper descendants inherit the resulting window through the tree.
+ */
+const applyCompositionSlotGates = (
+  nodes: MgRuntimeCompositionNode[],
+  records: readonly VisualFunctionRecord[],
+  fps: number,
+  durationFrames: number,
+): MgRuntimeCompositionNode[] => {
+  const recordsById = new Map(records.map((record) => [record.instanceKey, record]));
+  const childrenByParent = new Map<string, MgRuntimeCompositionNode[]>();
+  for (const node of nodes) {
+    if (!node.parentNodeId) continue;
+    const children = childrenByParent.get(node.parentNodeId) ?? [];
+    children.push(node);
+    childrenByParent.set(node.parentNodeId, children);
+  }
+  for (const children of childrenByParent.values()) {
+    children.sort((left, right) => left.startFrame - right.startFrame || left.zIndex - right.zIndex);
+  }
+
+  const slotsByParent = new Map<string, readonly CompositionSlot[]>();
+  for (const parent of nodes) {
+    const record = recordsById.get(parent.nodeId);
+    if (!record) continue;
+    const slots = compositionSlotsFor(parent, record, fps);
+    if (slots.length) slotsByParent.set(parent.nodeId, slots);
+  }
+
+  const fullEpisode = [{startFrame: 0, endFrame: durationFrames}];
+  const inheritedByNode = new Map<string, GlobalFrameWindow[]>();
+  const slotIdByNode = new Map<string, string>();
+  const visit = (
+    node: MgRuntimeCompositionNode,
+    inherited: readonly GlobalFrameWindow[],
+    inheritedSlotId?: string,
+  ): void => {
+    inheritedByNode.set(node.nodeId, [...inherited]);
+    if (inheritedSlotId) slotIdByNode.set(node.nodeId, inheritedSlotId);
+    const slots = slotsByParent.get(node.nodeId);
+    if (!slots) {
+      for (const child of childrenByParent.get(node.nodeId) ?? []) visit(child, inherited, inheritedSlotId);
+      return;
+    }
+    const children = childrenByParent.get(node.nodeId) ?? [];
+    for (const child of children) {
+      // `order` identifies repeated instances of the child template. It is not
+      // the parent's slot index. Assign the child to the stage window that
+      // contains its actual timeline start instead.
+      const childOffset = child.startFrame - node.startFrame;
+      const slot = slots.find((candidate) =>
+        childOffset >= candidate.openFrame && childOffset < candidate.closeFrame,
+      );
+      if (!slot) throw new Error(`${node.nodeId} 的子节点 ${child.nodeId} 无法按时间匹配 composition slot`);
+      const slotWindow = [{
+        startFrame: node.startFrame + slot.openFrame,
+        endFrame: node.startFrame + slot.closeFrame,
+      }];
+      visit(
+        child,
+        intersectGlobalWindows(inherited, slotWindow),
+        slot.slotId,
+      );
+    }
+  };
+  for (const node of nodes) {
+    if (!node.parentNodeId) visit(node, fullEpisode);
+  }
+
+  return nodes.map((node) => {
+    const globalWindows = inheritedByNode.get(node.nodeId) ?? fullEpisode;
+    const localWindows = globalWindows.map((window) => ({
+      startFrame: Math.max(node.startFrame, window.startFrame) - node.startFrame,
+      endFrame: Math.min(node.endFrame, window.endFrame) - node.startFrame,
+    })).filter((window) => window.endFrame > window.startFrame);
+    const isFullNodeWindow = localWindows.length === 1
+      && localWindows[0].startFrame === 0
+      && localWindows[0].endFrame === node.endFrame - node.startFrame;
+    const compositionSlotId = slotIdByNode.get(node.nodeId);
+    if (isFullNodeWindow && !compositionSlotId) return node;
+    return {
+      ...node,
+      ...(compositionSlotId ? {compositionSlotId} : {}),
+      ...(isFullNodeWindow ? {} : {compositionWindows: localWindows}),
+    };
+  });
+};
 
 function assertPersistentNode(value: unknown, label: string): asserts value is CompositionNode {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} 不是合成节点对象`);
@@ -380,7 +536,7 @@ const buildRuntimeInput = (records: VisualFunctionRecord[], renderBundle: MgRend
   if (!Array.isArray(records)) throw new Error("function_calls.json 格式无效");
   const calls = new Map(records.map((record) => [record.instanceKey, record]));
   if (calls.size !== records.length) throw new Error("function_calls.json 存在重复实例");
-  const nodes: MgRuntimeCompositionNode[] = renderBundle.nodes.map((node, index) => {
+  const baseNodes: MgRuntimeCompositionNode[] = renderBundle.nodes.map((node, index) => {
     const record = calls.get(node.nodeId);
     if (!record) throw new Error(`合成节点 ${node.nodeId} 缺少 Function Call 记录`);
     if (records[index]?.instanceKey !== node.nodeId) {
@@ -398,13 +554,15 @@ const buildRuntimeInput = (records: VisualFunctionRecord[], renderBundle: MgRend
     }
     return {
       ...node,
+      htmlTag: record.htmlTag,
       layerRole: record.layerRole,
       ...(record.activeWindows?.length ? {activeWindows: record.activeWindows} : {}),
     };
   });
-  if (nodes.length !== records.length) {
+  if (baseNodes.length !== records.length) {
     throw new Error("Function Call 数量与合成节点数量不一致");
   }
+  const nodes = applyCompositionSlotGates(baseNodes, records, renderBundle.fps, renderBundle.durationFrames);
   return {
     width: renderBundle.width,
     height: renderBundle.height,
