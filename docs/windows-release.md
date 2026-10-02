@@ -5,7 +5,7 @@
 - [`story-claw`](https://github.com/ZC89757/story-claw/releases) 发布 `Story-Claw-Setup-<version>.exe`：主程序。故事项目只需要安装它。
 - [`story-claw-templates`](https://github.com/ZC89757/story-claw-templates/releases) 发布 `Story-Claw-MG-Template-Pack-Setup-<version>.exe`：可选 MG 模板包。议论文 MG 标注、Function Calling、模板预览和 Remotion 合成需要它。
 
-模板包默认安装到 `%LOCALAPPDATA%\StoryClaw\mg-templates`。主程序读取 `manifest.json`，要求 `protocolVersion=1`，然后通过 Provider 的 `getMgTemplateProvider()` 取得函数定义、JSON Schema、解析器和渲染入口。未安装或协议不兼容时，主程序仍能启动并运行故事流程；进入议论文 MG 流程时会显示安装或更新提示。
+模板包默认安装到 `%LOCALAPPDATA%\StoryClaw\mg-templates`。主程序读取 `manifest.json`，要求 `protocolVersion=2`，然后通过 Provider 的 `getMgTemplateProvider()` 取得函数定义、JSON Schema、解析器、渲染入口和模板拥有的嵌套合成窗口规则。未安装或协议不兼容时，主程序仍能启动并运行故事流程；进入议论文 MG 流程时会显示安装或更新提示。
 
 ## 本地构建
 

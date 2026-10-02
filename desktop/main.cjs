@@ -141,12 +141,12 @@ function getMgTemplateRuntime() {
     if (fsSync.existsSync(manifestPath) && fsSync.existsSync(providerPath)) {
       mgTemplateRuntimePromise = fs.readFile(manifestPath, "utf8").then(async (content) => {
         const manifest = JSON.parse(content);
-        if (manifest.protocolVersion !== 1) {
-          throw new Error(`MG Template Pack 接口版本不兼容：主程序需要 v1，当前为 v${String(manifest.protocolVersion ?? "未知")}`);
+        if (manifest.protocolVersion !== 2) {
+          throw new Error(`MG Template Pack 接口版本不兼容：主程序需要 v2，当前为 v${String(manifest.protocolVersion ?? "未知")}`);
         }
         const module = await import(`${pathToFileURL(providerPath).href}?v=${encodeURIComponent(String(manifest.version || "0"))}`);
         const provider = module.getMgTemplateProvider();
-        if (provider.protocolVersion !== 1) throw new Error("MG Template Pack Provider 协议不兼容");
+        if (Number(provider.protocolVersion) !== 2) throw new Error("MG Template Pack Provider 协议不兼容");
         return {packageRoot: mgTemplatePackRoot, provider};
       });
     } else if (!app.isPackaged) {
@@ -210,7 +210,7 @@ function assertMgTemplatePackInstalled() {
   }
   try {
     const manifest = JSON.parse(fsSync.readFileSync(manifestPath, "utf8"));
-    if (manifest.protocolVersion !== 1) throw new Error(`需要接口 v1，当前为 v${String(manifest.protocolVersion ?? "未知")}`);
+    if (manifest.protocolVersion !== 2) throw new Error(`需要接口 v2，当前为 v${String(manifest.protocolVersion ?? "未知")}`);
   } catch (error) {
     throw new Error(`MG Template Pack 不兼容或已损坏，请重新安装：${error instanceof Error ? error.message : String(error)}`);
   }

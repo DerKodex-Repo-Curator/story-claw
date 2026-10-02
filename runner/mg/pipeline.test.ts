@@ -8,7 +8,7 @@ import {
   stripMgAnnotationDecoration,
   validateMgAnnotationHtml,
 } from "./html.js";
-import {compileMgScenes, computeScLongtakeSegmentWindows, selectMgFunctionDefinitions} from "./planner.js";
+import {compileMgScenes, computeScLongtakeSegmentWindows, selectMgFunctionDefinitions, selectMgPlanningTargets} from "./planner.js";
 import {resolveMgFunctionCall} from "./registry.js";
 import type {LocatedMgTag, MgInstanceInfo, MgMode, MgVideoInfo} from "./types.js";
 
@@ -41,6 +41,19 @@ test("MG HTML preserves clean text and locates nested groups on the real timelin
   assert.equal(instances.get("emphasis::scale::one")?.parentInstance, "decomposition::cards::one");
   assert.equal(instances.get("emphasis::scale::one")?.depth, 1);
   assert.ok((instances.get("progress-timeline::horizontal::one")?.tags[1].start ?? 0) > (instances.get("progress-timeline::horizontal::one")?.tags[0].end ?? 0));
+});
+
+test("targeted MG planning selects only the requested nested instance", () => {
+  const instances = locateMgInstances(html, buildTimeline(article), article);
+  const root = instances.get("decomposition::cards::one")!;
+  const child = instances.get("emphasis::scale::one")!;
+  const scopes = new Map([[root.instanceKey, [root, child]]]);
+  const reusableCalls = new Map();
+  assert.deepEqual(selectMgPlanningTargets([root], scopes, reusableCalls), [{root, members: [root, child]}]);
+  assert.deepEqual(
+    selectMgPlanningTargets([root], scopes, reusableCalls, new Set([child.instanceKey])),
+    [{root: child, members: [child]}],
+  );
 });
 
 test("MG HTML rejects at because timestamps belong to Function Calling", () => {
@@ -442,4 +455,84 @@ test("an MG cue near the end never exceeds the raw master frame range", () => {
   assert.equal(scenes[0].startFrame, 499);
   assert.equal(scenes[0].endFrame, 500);
   assert.equal(scenes[0].durationFrames, 1);
+});
+
+const cutoutCall = (at = 0) => resolveMgFunctionCall({
+  id: "cutout-window",
+  name: "create_cutout_rise",
+  arguments: {
+    group: "rise",
+    order: null,
+    at,
+    source: {
+      mode: "transparent",
+      image: "https://example.com/cutout.png",
+      subject: null,
+      references: [],
+    },
+  },
+});
+
+const cutoutScenesFor = (source: string, markup: string) => {
+  const annotated = `<!DOCTYPE html><html><body><article>${markup}</article></body></html>`;
+  const instances = locateMgInstances(annotated, buildTimeline(source), source);
+  const cutout = instances.get("mg-cutout::rise::one");
+  assert.ok(cutout);
+  const call = cutoutCall(cutout.tags[0].start);
+  return compileMgScenes([call], instances, video);
+};
+
+test("mg-cutout extends only to a directly adjacent same-level tag", () => {
+  const source = "甲乙丙";
+  const scenes = cutoutScenesFor(
+    source,
+    `<mg-cutout group="rise" mode="together">甲</mg-cutout>`
+      + `<emphasis group="scale" mode="together">乙</emphasis>丙`,
+  );
+  assert.equal(scenes.length, 1);
+  assert.equal(scenes[0].startFrame, 0);
+  assert.equal(scenes[0].endFrame, 38);
+});
+
+test("mg-cutout does not cross untagged prose before the next sibling", () => {
+  const source = "甲X乙";
+  const scenes = cutoutScenesFor(
+    source,
+    `<mg-cutout group="rise" mode="together">甲</mg-cutout>X`
+      + `<emphasis group="scale" mode="together">乙</emphasis>`,
+  );
+  assert.equal(scenes.length, 1);
+  assert.equal(scenes[0].endFrame, 38);
+});
+
+test("mg-cutout stays within its own tag when there is no following sibling", () => {
+  const source = "甲乙";
+  const scenes = cutoutScenesFor(
+    source,
+    `<mg-cutout group="rise" mode="together">甲</mg-cutout>乙`,
+  );
+  assert.equal(scenes.length, 1);
+  assert.equal(scenes[0].endFrame, 38);
+});
+
+test("mg-cutout does not extend to a tag under a different parent", () => {
+  const source = "甲乙";
+  const scenes = cutoutScenesFor(
+    source,
+    `<decomposition group="cards" mode="together">`
+      + `<mg-cutout group="rise" mode="together">甲</mg-cutout>`
+      + `</decomposition><emphasis group="scale" mode="together">乙</emphasis>`,
+  );
+  assert.equal(scenes.length, 1);
+  assert.equal(scenes[0].endFrame, 38);
+});
+
+test("mg-cutout keeps a naturally longer source window", () => {
+  const source = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳";
+  const scenes = cutoutScenesFor(
+    source,
+    `<mg-cutout group="rise" mode="together">${source}</mg-cutout>`,
+  );
+  assert.equal(scenes.length, 1);
+  assert.equal(scenes[0].endFrame, 40);
 });

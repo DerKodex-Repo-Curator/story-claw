@@ -5,7 +5,7 @@ import path from "node:path";
 import {pathToFileURL} from "node:url";
 import type {getMgTemplateProvider as ProviderFactory} from "@story-claw/mg-templates/provider";
 
-export const MG_TEMPLATE_PROTOCOL_VERSION = 1;
+export const MG_TEMPLATE_PROTOCOL_VERSION = 2;
 
 type MgTemplateProvider = ReturnType<typeof ProviderFactory>;
 
@@ -64,7 +64,7 @@ export async function loadMgTemplateProvider(): Promise<MgTemplateProvider> {
     const module = await import(`${pathToFileURL(providerPath).href}?v=${encodeURIComponent(String(manifest.version ?? "0"))}`);
     if (typeof module.getMgTemplateProvider !== "function") throw new Error("MG Template Pack 未导出 getMgTemplateProvider()" );
     const provider = module.getMgTemplateProvider() as MgTemplateProvider;
-    if (provider.protocolVersion !== MG_TEMPLATE_PROTOCOL_VERSION) {
+    if (Number(provider.protocolVersion) !== MG_TEMPLATE_PROTOCOL_VERSION) {
       throw new Error(`MG Template Pack Provider 协议不兼容：${String(provider.protocolVersion)}`);
     }
     return provider;

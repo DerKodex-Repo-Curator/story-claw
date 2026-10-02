@@ -39,8 +39,40 @@ const MEDIA_MAX_ATTEMPTS = 3;
 const WEB_NEWS_REPLAN_MAX_ATTEMPTS = 3;
 const VISUAL_RENDER_CACHE_VERSION = 2;
 
+export type MgPlanRefreshOptions = {
+  replanInstanceKeys?: readonly string[];
+  rerenderInstanceKeys?: readonly string[];
+  reuseGeneratedVideoInstanceKeys?: readonly string[];
+};
+
 const isGeneratedVideoTag = (tag: string | undefined): boolean =>
   tag === "sc-video" || tag === "sc-longtake";
+
+type TemplateTimingDescriptor = {
+  htmlTag: string;
+  minDurationSeconds?: unknown;
+};
+
+/** Read an optional animation minimum from the template Provider metadata. */
+const minimumDurationFramesFor = (htmlTag: string, fps: number): number => {
+  const descriptor = (mgProvider.templates as readonly TemplateTimingDescriptor[])
+    .find((candidate) => candidate.htmlTag === htmlTag);
+  const seconds = descriptor?.minDurationSeconds;
+  return typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0
+    ? Math.max(1, Math.ceil(seconds * fps))
+    : 0;
+};
+
+const endFrameWithMinimumDuration = (
+  startFrame: number,
+  naturalEndFrame: number,
+  htmlTag: string,
+  fps: number,
+  durationFrames: number,
+): number => Math.min(
+  durationFrames,
+  Math.max(startFrame + 1, naturalEndFrame, startFrame + minimumDurationFramesFor(htmlTag, fps)),
+);
 
 const directedGraphNodeId = (index: number): string => `n${index}`;
 
@@ -177,6 +209,37 @@ const nextMgStart = (
   .filter((candidate) => candidate.documentOrder > tag.documentOrder)
   .sort((left, right) => left.documentOrder - right.documentOrder)[0]?.start;
 
+/**
+ * Return the end of the next direct sibling only when it is text-adjacent to
+ * the current tag. An unmarked character between the tags deliberately breaks
+ * the extension rule, so a cutout falls back to its own annotation range.
+ */
+const nextAdjacentSiblingEnd = (
+  tag: MgInstanceInfo["tags"][number],
+  owner: MgInstanceInfo,
+  instances: Map<string, MgInstanceInfo>,
+): number | undefined => {
+  const next = [...instances.values()]
+    .filter((candidate) => candidate.instanceKey !== owner.instanceKey)
+    .flatMap((candidate) => candidate.tags)
+    .filter((candidate) => (
+      candidate.parentInstance === tag.parentInstance
+      && candidate.documentOrder > tag.documentOrder
+    ))
+    .sort((left, right) => left.documentOrder - right.documentOrder)[0];
+  if (!next) return undefined;
+
+  const hasOffsets = (
+    value: MgInstanceInfo["tags"][number],
+  ): value is MgInstanceInfo["tags"][number] & {startOffset: number; endOffset: number} =>
+    Number.isInteger((value as {startOffset?: unknown}).startOffset)
+    && Number.isInteger((value as {endOffset?: unknown}).endOffset);
+  const adjacent = hasOffsets(tag) && hasOffsets(next)
+    ? next.startOffset === tag.endOffset
+    : Math.abs(next.start - tag.end) <= 0.001;
+  return adjacent ? next.end : undefined;
+};
+
 const instanceWindows = (
   call: ResolvedMgFunctionCall,
   instance: MgInstanceInfo,
@@ -188,11 +251,22 @@ const instanceWindows = (
   const rootFrame = startFrameAt(call.at);
   if (instance.mode === "together") {
     const lastTag = instance.tags.at(-1)!;
-    const endSeconds = nextMgStart(lastTag, instance, instances) ?? video.duration;
+    const cutoutSiblingEnd = instance.tag === "mg-cutout"
+      ? nextAdjacentSiblingEnd(lastTag, instance, instances)
+      : undefined;
+    const endSeconds = instance.tag === "mg-cutout"
+      ? cutoutSiblingEnd ?? lastTag.end
+      : nextMgStart(lastTag, instance, instances) ?? video.duration;
     return [{
       key: `${instance.instanceKey}-together`, instance, call, rootFrame,
       startFrame: rootFrame,
-      endFrame: Math.min(video.durationFrames, Math.max(rootFrame + 1, frame(endSeconds))),
+      endFrame: endFrameWithMinimumDuration(
+        rootFrame,
+        frame(endSeconds),
+        instance.tag,
+        video.fps,
+        video.durationFrames,
+      ),
       sourceText: instance.tags.map((tag) => tag.text).join("｜"),
       order: instance.tags[0].documentOrder,
     }];
@@ -204,10 +278,7 @@ const instanceWindows = (
     return {
       key: `${instance.instanceKey}-split-${index + 1}`,
       instance, call, rootFrame, startFrame,
-      endFrame: Math.min(
-        video.durationFrames,
-        Math.max(startFrame + 1, nextStartFrame),
-      ),
+      endFrame: endFrameWithMinimumDuration(startFrame, nextStartFrame, instance.tag, video.fps, video.durationFrames),
       sourceText: tag.text,
       order: tag.documentOrder,
     };
@@ -563,12 +634,27 @@ const runScope = async (
   throw lastError ?? new Error(`${root.instanceKey} Function Calling 失败`);
 };
 
-const isWebNewsCaptureFailure = (error: unknown): boolean =>
-  (error instanceof Error ? error.message : String(error)).includes("WEB_NEWS_FOCUS_CAPTURE_FAILED");
+export const selectMgPlanningTargets = (
+  roots: readonly MgInstanceInfo[],
+  scopes: ReadonlyMap<string, MgInstanceInfo[]>,
+  reusableCalls: ReadonlyMap<string, ResolvedMgFunctionCall>,
+  replanInstanceKeys?: ReadonlySet<string>,
+): Array<{root: MgInstanceInfo; members: MgInstanceInfo[]}> => replanInstanceKeys
+  ? [...scopes.values()].flat().filter((instance) => replanInstanceKeys.has(instance.instanceKey))
+    .map((instance) => ({root: instance, members: [instance]}))
+  : roots.filter((root) => scopes.get(root.instanceKey)!.some((instance) => !reusableCalls.has(instance.instanceKey)))
+    .map((root) => ({root, members: scopes.get(root.instanceKey)!}));
 
-const failedWebNewsUrl = (error: unknown): string | undefined => {
+const isWebFocusTag = (tag: string | undefined): boolean => tag === "web-news-focus" || tag === "web-page-focus";
+
+const isWebFocusCaptureFailure = (error: unknown): boolean => {
   const message = error instanceof Error ? error.message : String(error);
-  return message.match(/WEB_NEWS_FOCUS_CAPTURE_FAILED url=(\S+)/)?.[1];
+  return message.includes("WEB_NEWS_FOCUS_CAPTURE_FAILED") || message.includes("WEB_PAGE_FOCUS_CAPTURE_FAILED");
+};
+
+const failedWebFocusUrl = (error: unknown): string | undefined => {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.match(/WEB_(?:NEWS|PAGE)_FOCUS_CAPTURE_FAILED url=(\S+)/)?.[1];
 };
 
 const normalizedWebUrl = (value: unknown): string | undefined => {
@@ -589,16 +675,25 @@ const ownTargetWindow = (
 ): {startFrame: number; endFrame: number} => {
   const start = instance.tags[0].start;
   const last = instance.tags.at(-1)!;
-  const nextStart = isGeneratedVideoTag(instance.tag)
+  const cutoutSiblingEnd = instance.tag === "mg-cutout"
+    ? nextAdjacentSiblingEnd(last, instance, instances)
+    : undefined;
+  const nextStart = isGeneratedVideoTag(instance.tag) || instance.tag === "mg-cutout"
     ? undefined
     : nextMgStart(last, instance, instances);
-  const end = nextStart ?? (isGeneratedVideoTag(instance.tag)
-    ? last.end
-    : video.duration);
+  const end = instance.tag === "mg-cutout"
+    ? cutoutSiblingEnd ?? last.end
+    : nextStart ?? (isGeneratedVideoTag(instance.tag) ? last.end : video.duration);
   const startFrame = Math.max(0, Math.min(video.durationFrames - 1, Math.round(start * video.fps)));
   const endFrame = Math.min(
     video.durationFrames,
-    Math.max(startFrame + 1, Math.round(end * video.fps)),
+    endFrameWithMinimumDuration(
+      startFrame,
+      Math.round(end * video.fps),
+      instance.tag,
+      video.fps,
+      video.durationFrames,
+    ),
   );
   return {startFrame, endFrame};
 };
@@ -994,12 +1089,13 @@ const renderTemplateTask = async (
   clipsDir: string,
   video: MgVideoInfo,
   update: (status: VisualFunctionStatus, extra?: Partial<VisualFunctionRecord>) => Promise<void>,
+  forceRender = false,
 ): Promise<string> => {
   const activeWindows = localActiveWindows(instance, instances, video, windowCache);
   const needsAlpha = call.layerRole === "overlay" || activeWindows.length > 0;
   const extension = needsAlpha ? ".mov" : ".mp4";
   const outputPath = path.join(clipsDir, `${clipFileStem(call.instanceKey, record.taskSignature)}${extension}`);
-  if (await reuseValidClip(outputPath, record.endFrame - record.startFrame, video.fps)) return outputPath;
+  if (!forceRender && await reuseValidClip(outputPath, record.endFrame - record.startFrame, video.fps)) return outputPath;
   await update("rendering_template");
   const {renderVisualTagTemplateClip} = await import("./renderer.js");
   await renderVisualTagTemplateClip(
@@ -1143,7 +1239,7 @@ export async function isEssayMgPlanCurrent(sel: NovelSelection): Promise<boolean
   }
 }
 
-export async function planEssayMg(sel: NovelSelection): Promise<string> {
+export async function planEssayMg(sel: NovelSelection, refresh: MgPlanRefreshOptions = {}): Promise<string> {
   const htmlPath = novelPaths.mgAnnotation(sel.novelName, sel.episode);
   const timelinePath = novelPaths.articleTimeline(sel.novelName, sel.episode);
   const articlePath = novelPaths.cleanedText(sel.novelName, sel.episode);
@@ -1185,11 +1281,45 @@ export async function planEssayMg(sel: NovelSelection): Promise<string> {
   ]);
 
   const previousRecords = await readFunctionRecords(sel);
-  await cleanupUnreferencedClips(sel, previousRecords);
+  const replanInstanceKeys = new Set(refresh.replanInstanceKeys ?? []);
+  const rerenderInstanceKeys = new Set(refresh.rerenderInstanceKeys ?? []);
+  const targetedRefresh = replanInstanceKeys.size > 0 || rerenderInstanceKeys.size > 0;
+  const forcedRenderKeys = new Set([...replanInstanceKeys, ...rerenderInstanceKeys]);
+  if (!targetedRefresh) await cleanupUnreferencedClips(sel, previousRecords);
   const previousByInstance = new Map(previousRecords.map((record) => [record.instanceKey, record]));
+  const reuseGeneratedKeys = new Set(refresh.reuseGeneratedVideoInstanceKeys ?? []);
+  if (targetedRefresh && reuseGeneratedKeys.size) {
+    throw new Error("定向重跑不能同时指定保留已有生成视频");
+  }
+  if (targetedRefresh) {
+    const unknown = [...forcedRenderKeys].filter((key) => !instances.has(key));
+    if (unknown.length) throw new Error(`定向重跑找不到实例: ${unknown.join(", ")}`);
+    if (previousByInstance.size !== instances.size) throw new Error("定向重跑需要完整的旧 Function Call 记录");
+    const generatedVideoKeys = [...forcedRenderKeys].filter((key) => isGeneratedVideoTag(instances.get(key)?.tag));
+    if (generatedVideoKeys.length) throw new Error(`定向 MG 重跑不能重新生成图生视频: ${generatedVideoKeys.join(", ")}`);
+  }
   const windowCache = new Map<string, {startFrame: number; endFrame: number}>();
   const reusableCalls = new Map<string, ResolvedMgFunctionCall>();
-  for (const root of roots) {
+  const preservedGeneratedCalls = new Map<string, ResolvedMgFunctionCall>();
+  for (const key of reuseGeneratedKeys) {
+    const instance = instances.get(key);
+    const previous = previousByInstance.get(key);
+    if (!instance || !isGeneratedVideoTag(instance.tag) || previous?.status !== "completed" || !previous.videoPath) {
+      throw new Error(`无法保留生成视频 ${key}：缺少当前实例或已完成的旧片段`);
+    }
+    const call = bindHostTimeline(
+      resolveMgFunctionCall({id: previous.id, name: previous.name, arguments: previous.arguments}),
+      instance,
+    );
+    validateResolvedCall(call, instance, video.duration);
+    const current = targetWindow(instance, instances, video, windowCache);
+    if (previous.startFrame !== current.startFrame || previous.endFrame !== current.endFrame) {
+      throw new Error(`无法保留生成视频 ${key}：新旧时间窗口不同`);
+    }
+    await assertMgVideoFrames(previous.videoPath, current.endFrame - current.startFrame, video.fps);
+    preservedGeneratedCalls.set(key, call);
+  }
+  for (const root of targetedRefresh ? [] : roots) {
     const members = scopes.get(root.instanceKey)!;
     const scopeCalls: ResolvedMgFunctionCall[] = [];
     let complete = true;
@@ -1219,15 +1349,49 @@ export async function planEssayMg(sel: NovelSelection): Promise<string> {
     }
   }
 
-  const scopesToRun = roots.filter((root) =>
-    scopes.get(root.instanceKey)!.some((instance) => !reusableCalls.has(instance.instanceKey)),
+  if (targetedRefresh) {
+    for (const instance of instances.values()) {
+      const previous = previousByInstance.get(instance.instanceKey);
+      if (!previous) throw new Error(`定向重跑缺少 ${instance.instanceKey} 的旧 Function Call`);
+      if (replanInstanceKeys.has(instance.instanceKey)) continue;
+      const providerCall = resolveMgFunctionCall({id: previous.id, name: previous.name, arguments: previous.arguments});
+      const call = bindHostTimeline(providerCall, instance);
+      validateResolvedCall(call, instance, video.duration);
+      const current = describeTask(call, instance, instances, video, windowCache, referenceImageHashes);
+      if (!rerenderInstanceKeys.has(instance.instanceKey)) {
+        if (previous.taskSignature !== current.signature || previous.startFrame !== current.startFrame || previous.endFrame !== current.endFrame) {
+          throw new Error(`定向重跑期间 ${instance.instanceKey} 的缓存签名或时间窗口已变化；请单独处理该实例`);
+        }
+        if (previous.status !== "completed" || !previous.videoPath || !fsSync.existsSync(previous.videoPath)) {
+          throw new Error(`定向重跑期间 ${instance.instanceKey} 缺少可复用片段`);
+        }
+        await assertMgVideoFrames(previous.videoPath, current.endFrame - current.startFrame, video.fps);
+      }
+      reusableCalls.set(instance.instanceKey, call);
+    }
+  }
+
+  const planningTargets = selectMgPlanningTargets(
+    roots, scopes, reusableCalls, targetedRefresh ? replanInstanceKeys : undefined,
   );
   const freshCalls = annotation.instanceCount === 0 ? [] : (await runWithConcurrency(
-    scopesToRun,
+    planningTargets,
     SCOPE_CONCURRENCY,
-    (root) => runScope(root, scopes.get(root.instanceKey)!, timeline, referenceImages, video.duration),
+    ({root, members}) => runScope(
+      root,
+      members,
+      timeline,
+      referenceImages,
+      video.duration,
+      targetedRefresh && isWebFocusTag(root.tag)
+        ? `旧网页 ${String(previousByInstance.get(root.instanceKey)?.arguments.url ?? "")} 捕获失败或产生黑帧。必须另选符合模板来源规则的网页，并从新网页正文逐字选取定位短语。`
+        : "",
+    ),
   )).flat();
-  for (const call of freshCalls) reusableCalls.set(call.instanceKey, call);
+  for (const call of freshCalls) {
+    if (!preservedGeneratedCalls.has(call.instanceKey)) reusableCalls.set(call.instanceKey, call);
+  }
+  for (const [key, call] of preservedGeneratedCalls) reusableCalls.set(key, call);
   const resolvedCalls = [...instances.values()].map((instance) => {
     const call = reusableCalls.get(instance.instanceKey);
     if (!call) throw new Error(`缺少 ${instance.instanceKey} 的 Function Call`);
@@ -1268,8 +1432,10 @@ export async function planEssayMg(sel: NovelSelection): Promise<string> {
       ...(activeWindows.length ? {activeWindows} : {}),
     };
     if (
+      !forcedRenderKeys.has(call.instanceKey)
+      &&
       previous?.status === "completed"
-      && previous.taskSignature === signature
+      && (previous.taskSignature === signature || preservedGeneratedCalls.has(call.instanceKey))
       && previous.videoPath
       && fsSync.existsSync(previous.videoPath)
     ) {
@@ -1292,7 +1458,9 @@ export async function planEssayMg(sel: NovelSelection): Promise<string> {
   };
 
   const callsByInstance = new Map(resolvedCalls.map((call) => [call.instanceKey, call]));
-  await runWithConcurrency(records, SCOPE_CONCURRENCY, async (record, index) => {
+  // Remotion template renders share a local Chromium/webpack runtime. Running
+  // several at once can close browser targets and strand every pending clip.
+  await runWithConcurrency(records, 1, async (record, index) => {
     let call = callsByInstance.get(record.instanceKey)!;
     if (record.status === "completed" && record.videoPath) {
       if (await reuseValidClip(record.videoPath, record.endFrame - record.startFrame, video.fps)) {
@@ -1338,6 +1506,7 @@ export async function planEssayMg(sel: NovelSelection): Promise<string> {
             clipsDir,
             video,
             (status, extra) => updateRecord(index, status, extra),
+            forcedRenderKeys.has(call.instanceKey),
           );
         await updateRecord(index, "completed", {videoPath, error: undefined, retries: attempt - 1});
         return;
@@ -1345,8 +1514,8 @@ export async function planEssayMg(sel: NovelSelection): Promise<string> {
         lastError = error;
         const message = error instanceof Error ? error.message : String(error);
         await updateRecord(index, "failed", {error: message, retries: attempt});
-        if (call.htmlTag === "web-news-focus" && isWebNewsCaptureFailure(error)) {
-          const rejectedUrl = failedWebNewsUrl(error) ?? String(call.arguments.url ?? "");
+        if (isWebFocusTag(call.htmlTag) && isWebFocusCaptureFailure(error)) {
+          const rejectedUrl = failedWebFocusUrl(error) ?? String(call.arguments.url ?? "");
           const normalizedRejectedUrl = normalizedWebUrl(rejectedUrl);
           if (normalizedRejectedUrl) rejectedWebUrls.add(normalizedRejectedUrl);
           if (webReplans >= WEB_NEWS_REPLAN_MAX_ATTEMPTS) break;
@@ -1356,7 +1525,8 @@ export async function planEssayMg(sel: NovelSelection): Promise<string> {
             webReplans++;
             console.warn(`[视觉任务] ${record.instanceKey} 网页捕获失败，通知主流程重新搜索 (${webReplans}/${WEB_NEWS_REPLAN_MAX_ATTEMPTS}): ${rejectedUrl}`);
             const rejectedList = [...rejectedWebUrls].join("、") || rejectedUrl;
-            const feedback = `网页重点实例 ${record.instanceKey} 的页面捕获失败。必须调用 search_web({query}) 搜索另一篇可靠报道，再调用 search_web({url}) 读取所选正文。以下 URL 均已被程序拒绝，不能再次使用：${rejectedList}。不能使用 fallback URL、摘要或截图替代。然后仅为此实例重新调用 create_web_news_focus，保留当前时间轴语义并使用新网页正文中的逐字短语。`;
+            const nextFunction = call.name;
+            const feedback = `网页重点实例 ${record.instanceKey} 的页面捕获失败。必须调用 search_web({query}) 搜索另一篇可靠来源，再调用 search_web({url}) 读取所选正文。以下 URL 均已被程序拒绝，不能再次使用：${rejectedList}。不能使用 fallback URL、摘要或截图替代。然后仅为此实例重新调用 ${nextFunction}，保留当前时间轴语义并使用新网页正文中的逐字定位短语。`;
             try {
               const replanned = await runScope(instance, [instance], timeline, referenceImages, video.duration, feedback);
               const nextCall = replanned[0];
@@ -1424,7 +1594,7 @@ export async function planEssayMg(sel: NovelSelection): Promise<string> {
     fs.writeFile(novelPaths.mgFunctionCalls(sel.novelName, sel.episode), `${JSON.stringify(records, null, 2)}\n`, "utf-8"),
     fs.writeFile(novelPaths.mgRenderBundle(sel.novelName, sel.episode), `${JSON.stringify(bundle, null, 2)}\n`, "utf-8"),
   ]);
-  await cleanupUnreferencedClips(sel, records);
-  console.log(`[视觉规划] ${scopesToRun.length}/${roots.length} 个 Agent scope / ${records.length} 个 Function Call / ${nodes.length} 个合成节点`);
+  if (!targetedRefresh) await cleanupUnreferencedClips(sel, records);
+  console.log(`[视觉规划] ${planningTargets.length}/${roots.length} 个 Agent scope / ${records.length} 个 Function Call / ${nodes.length} 个合成节点`);
   return novelPaths.mgFunctionCalls(sel.novelName, sel.episode);
 }

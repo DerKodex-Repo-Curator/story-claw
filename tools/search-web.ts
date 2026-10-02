@@ -33,6 +33,157 @@ type SearchHit = {
   snippet?: string;
   imageUrl?: string;
   screenshotUrl: string;
+  sourceQuality: SourceQuality;
+  sourceReason: string;
+};
+
+type SourceQuality = "official" | "major-media" | "research" | "x-related" | "other" | "excluded";
+
+const MAJOR_MEDIA_HOSTS = new Set([
+  "reuters.com",
+  "apnews.com",
+  "bbc.com",
+  "bbc.co.uk",
+  "techcrunch.com",
+  "theverge.com",
+  "arstechnica.com",
+  "technologyreview.com",
+  "bloomberg.com",
+  "ft.com",
+  "wsj.com",
+  "nytimes.com",
+  "washingtonpost.com",
+  "theguardian.com",
+  "cnbc.com",
+  "wired.com",
+  "axios.com",
+  "scmp.com",
+  "nikkei.com",
+  "news.cn",
+  "xinhuanet.com",
+  "people.com.cn",
+  "cctv.com",
+  "cnr.cn",
+  "gmw.cn",
+  "chinanews.com.cn",
+  "caixin.com",
+  "yicai.com",
+  "stcn.com",
+  "thepaper.cn",
+  "jiemian.com",
+  "36kr.com",
+]);
+
+// Known first-party company/newsroom/documentation domains.  Keep this list
+// explicit so a random blog or repost host cannot be promoted to `official`
+// merely because its hostname contains words such as "blog" or "news".
+const OFFICIAL_HOSTS = new Set([
+  "openai.com",
+  "anthropic.com",
+  "deepmind.google",
+  "ai.google",
+  "research.google",
+  "blog.google",
+  "googleblog.com",
+  "cloud.google.com",
+  "microsoft.com",
+  "blogs.microsoft.com",
+  "azure.microsoft.com",
+  "github.blog",
+  "docs.github.com",
+  "meta.com",
+  "about.fb.com",
+  "ai.meta.com",
+  "apple.com",
+  "developer.apple.com",
+  "nvidia.com",
+  "developer.nvidia.com",
+  "blogs.nvidia.com",
+  "aws.amazon.com",
+  "ibm.com",
+  "intel.com",
+  "x.ai",
+  "mistral.ai",
+  "cohere.com",
+  "databricks.com",
+  "stability.ai",
+  "adobe.com",
+  "salesforce.com",
+  "oracle.com",
+  "ir.baidu.com",
+  "aliyun.com",
+  "alibabagroup.com",
+  "tencent.com",
+  "deepseek.com",
+  "zhipuai.cn",
+  "moonshot.cn",
+  "stepfun.com",
+  "minimax.io",
+]);
+
+const EXCLUDED_HOST_PATTERNS = [
+  /(?:^|\.)weibo\.com$/i,
+  /(?:^|\.)medium\.com$/i,
+  /(?:^|\.)substack\.com$/i,
+  /(?:^|\.)blogspot\.[a-z.]+$/i,
+  /(?:^|\.)wordpress\.[a-z.]+$/i,
+  /(?:^|\.)zhihu\.com$/i,
+  /(?:^|\.)baijiahao\.baidu\.com$/i,
+  /(?:^|\.)mp\.weixin\.qq\.com$/i,
+  /(?:^|\.)blog\.sina\.com\.cn$/i,
+  /(?:^|\.)blog\.csdn\.net$/i,
+  /(?:^|\.)toutiao\.com$/i,
+  /(?:^|\.)reddit\.com$/i,
+  /(?:^|\.)quora\.com$/i,
+  /(?:^|\.)juejin\.cn$/i,
+  /(?:^|\.)bilibili\.com$/i,
+  /(?:^|\.)feedly\.com$/i,
+  /(?:^|\.)ground\.news$/i,
+  /^news\.google\.com$/i,
+  /(?:^|\.)bing\.com$/i,
+  /(?:^|\.)duckduckgo\.com$/i,
+];
+
+const hostnameFor = (value: string): string => {
+  try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ""); } catch { return ""; }
+};
+
+const isResearchHost = (hostname: string): boolean =>
+  hostname.endsWith(".edu") || hostname.endsWith(".edu.cn") || hostname.endsWith(".ac.uk")
+  || hostname.endsWith(".ac.cn") || hostname.endsWith(".gov") || hostname.endsWith(".gov.cn");
+
+const isOfficialHost = (hostname: string): boolean =>
+  [...OFFICIAL_HOSTS].some((host) => hostname === host || hostname.endsWith(`.${host}`));
+
+export const classifySource = (value: string): {sourceQuality: SourceQuality; sourceReason: string} => {
+  const hostname = hostnameFor(value);
+  if (!hostname) return {sourceQuality: "excluded", sourceReason: "invalid URL hostname"};
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local") || net.isIP(hostname)) {
+    return {sourceQuality: "excluded", sourceReason: "非公开网页地址"};
+  }
+  if (EXCLUDED_HOST_PATTERNS.some((pattern) => pattern.test(hostname))) {
+    return {sourceQuality: "excluded", sourceReason: "个人博客、社交平台或转载聚合域名"};
+  }
+  if (hostname === "x.com" || hostname.endsWith(".x.com") || hostname === "twitter.com" || hostname.endsWith(".twitter.com")) {
+    const pathname = new URL(value).pathname;
+    if (!/^\/[A-Za-z0-9_]+\/status\/\d+(?:\/|$)/.test(pathname)) {
+      return {sourceQuality: "excluded", sourceReason: "X/Twitter 链接不是原帖"};
+    }
+    return {sourceQuality: "x-related", sourceReason: "X/Twitter；仅允许事件直接相关的官方账号、高管、研究者、当事人或现场参与者"};
+  }
+  if (MAJOR_MEDIA_HOSTS.has(hostname) || [...MAJOR_MEDIA_HOSTS].some((host) => hostname.endsWith(`.${host}`))) {
+    return {sourceQuality: "major-media", sourceReason: "主流新闻媒体"};
+  }
+  if (isOfficialHost(hostname)) return {sourceQuality: "official", sourceReason: "公司官方公告、技术博客、产品文档或研究页面"};
+  if (isResearchHost(hostname)) return {sourceQuality: "research", sourceReason: "政府、教育或研究机构域名"};
+  return {sourceQuality: "other", sourceReason: "未能从域名自动确认官方属性，需由规划模型核验"};
+};
+
+const assertReadableSource = (value: string): void => {
+  const classification = classifySource(value);
+  if (classification.sourceQuality === "excluded") {
+    throw new Error(`来源域名不符合质量要求：${classification.sourceReason}`);
+  }
 };
 
 const decodeHtml = (value: string): string => value
@@ -159,6 +310,7 @@ const responseHtml = async (response: Response): Promise<string> => {
 
 const readWebPage = async (inputUrl: string) => {
   let url = pageUrl(inputUrl);
+  assertReadableSource(url);
   for (let redirects = 0; redirects <= 5; redirects++) {
     const response = await fetchWithProxy(url, {
       headers: {"user-agent": "StoryClaw/1.0 web-search"},
@@ -169,6 +321,7 @@ const readWebPage = async (inputUrl: string) => {
       const location = response.headers.get("location");
       if (!location) throw new Error(`网页跳转缺少目标地址: ${url}`);
       url = pageUrl(new URL(location, url).href);
+      assertReadableSource(url);
       continue;
     }
     if (!response.ok) throw new Error(`网页读取失败: HTTP ${response.status}`);
@@ -206,6 +359,7 @@ const searchDuckDuckGo = async (query: string, maxResults: number): Promise<Arra
 };
 
 const enrichHit = async (hit: {title: string; url: string; snippet?: string}): Promise<SearchHit> => {
+  const source = classifySource(hit.url);
   let title = hit.title;
   let imageUrl: string | undefined;
   try {
@@ -221,8 +375,10 @@ const enrichHit = async (hit: {title: string; url: string; snippet?: string}): P
   } catch {
     // Search results remain useful when an article blocks metadata fetching.
   }
-  return {title, url: hit.url, snippet: hit.snippet, ...(imageUrl ? {imageUrl} : {}), screenshotUrl: screenshotUrlFor(hit.url)};
+  return {title, url: hit.url, snippet: hit.snippet, ...(imageUrl ? {imageUrl} : {}), screenshotUrl: screenshotUrlFor(hit.url), ...source};
 };
+
+const sourceRank = (quality: SourceQuality): number => ({official: 0, "major-media": 1, research: 2, "x-related": 3, other: 4, excluded: 9}[quality]);
 
 export const searchWebTool: ToolDefinition = {
   name: "search_web",
@@ -249,8 +405,10 @@ export const searchWebTool: ToolDefinition = {
       }
       const maxResults = Math.min(10, Math.max(2, Math.trunc(args.maxResults ?? 6)));
       const searchQuery = query!;
-      const raw = await searchDuckDuckGo(searchQuery, maxResults);
-      const hits = await Promise.all(raw.map(enrichHit));
+      const raw = await searchDuckDuckGo(searchQuery, maxResults * 4);
+      const eligible = raw.filter((hit) => classifySource(hit.url).sourceQuality !== "excluded")
+        .sort((left, right) => sourceRank(classifySource(left.url).sourceQuality) - sourceRank(classifySource(right.url).sourceQuality));
+      const hits = await Promise.all(eligible.slice(0, maxResults).map(enrichHit));
       return {
         content: [{type: "text" as const, text: JSON.stringify({query: searchQuery, results: hits}, null, 2)}],
         details: {query: searchQuery, count: hits.length},

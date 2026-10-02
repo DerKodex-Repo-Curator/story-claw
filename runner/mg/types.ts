@@ -28,6 +28,9 @@ export type LocatedMgTag = {
   text: string;
   start: number;
   end: number;
+  /** Normalized article-text offsets used to distinguish adjacent tags from intervening prose. */
+  startOffset?: number;
+  endOffset?: number;
   paragraphEnd: number;
   depth: number;
   parentInstance?: string;

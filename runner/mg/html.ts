@@ -131,23 +131,40 @@ const tagColorRules = (): string => MG_TAG_NAMES.map((tag, index) => {
   return `article ${tag} { --mg-accent: ${accent}; --mg-fill: ${fill}; }`;
 }).join("\n");
 
+const annotationRangeRules = (html: string): string => {
+  let maxDepth = 0;
+  const visit = (node: HtmlNode, depth: number): void => {
+    const nextDepth = depth + Number(Boolean(node.tagName && MG_TAGS.has(node.tagName)));
+    maxDepth = Math.max(maxDepth, nextDepth);
+    for (const child of node.childNodes ?? []) visit(child, nextDepth);
+  };
+  visit(parse5.parse(html), 0);
+
+  // Text decorations propagate through nested inline tags. Give each scope its
+  // own lane so child backgrounds/underlines cannot hide the parent range.
+  const scope = `:is(${MG_TAG_NAMES.join(", ")})`;
+  return [
+    `article { line-height: calc(1.5em + ${Math.max(0, maxDepth - 1) * 3}px); }`,
+    ...Array.from({length: maxDepth}, (_, index) =>
+      `article ${Array.from({length: index + 1}, () => scope).join(" ")} { text-underline-offset: ${(maxDepth - index) * 3}px; }`,
+    ),
+  ].join("\n");
+};
+
 const buildMgAnnotationStyle = (html: string): string => `<style id="${STYLE_ID}">
 :root { color-scheme: light; }
 body { margin: 0; background: #f3f5f6; color: #20262c; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
 article { padding: 24px; white-space: pre-wrap; }
 ${tagSelectors()} {
-  border-bottom: 2px solid var(--mg-accent); background: var(--mg-fill);
-  box-decoration-break: clone; -webkit-box-decoration-break: clone;
-}
-article ai-hot-focus-stage {
-  border-bottom: 0;
-  background: linear-gradient(to bottom, transparent calc(100% - 2px), var(--mg-accent) 0), var(--mg-fill);
+  background: var(--mg-fill);
+  text-decoration: underline var(--mg-accent) 2px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
   box-decoration-break: clone; -webkit-box-decoration-break: clone;
 }
 article mg-value {
-  padding: 1px 3px; border-bottom: 0;
-  background: linear-gradient(to bottom, transparent calc(100% - 2px), var(--mg-accent) 0),
-    color-mix(in srgb, var(--mg-accent) 24%, white);
+  padding: 1px 3px;
+  background: color-mix(in srgb, var(--mg-accent) 24%, white);
   box-decoration-break: clone; -webkit-box-decoration-break: clone;
 }
 ${tagSelectors("::before")} {
@@ -156,6 +173,7 @@ ${tagSelectors("::before")} {
   vertical-align: 1px; white-space: normal; overflow-wrap: anywhere;
 }
 ${tagColorRules()}
+${annotationRangeRules(html)}
 ${annotationRules(html)}
 </style>`;
 
@@ -264,6 +282,9 @@ const parseStructure = (html: string, articleSource: string): ParsedStructure =>
   if (articleText !== normalizeSourceText(articleSource)) {
     throw new Error("MG HTML 去标签后的全文与原文不一致");
   }
+  const plainText = textContent(article).replace(/\r\n?/g, "\n").replace(/\n/g, "");
+  const leadingTrimmedLength = plainText.length - plainText.trimStart().length;
+  const articleLength = timelineText(articleText).length;
 
   const allMgNodes = descendants(document, (node) => Boolean(node.tagName && MG_TAGS.has(node.tagName)));
   const articleMgNodes = descendants(article, (node) => Boolean(node.tagName && MG_TAGS.has(node.tagName)));
@@ -272,9 +293,10 @@ const parseStructure = (html: string, articleSource: string): ParsedStructure =>
   const tags: ParsedStructure["tags"] = [];
   let documentOrder = 0;
   let relativeOffset = 0;
+  const articleOffset = (): number => Math.max(0, Math.min(articleLength, relativeOffset - leadingTrimmedLength));
   const walk = (node: HtmlNode, ancestors: string[], markerSink?: Array<{value: number; text: string; startOffset: number; endOffset: number}>) => {
       if (node.nodeName === "#text") {
-        relativeOffset += timelineText(node.value ?? "").length;
+        relativeOffset += (node.value ?? "").replace(/\r\n?/g, "\n").replace(/\n/g, "").length;
         return;
       }
       if (node.tagName === MG_VALUE_TAG) {
@@ -283,9 +305,9 @@ const parseStructure = (html: string, articleSource: string): ParsedStructure =>
         if (Object.keys(attrs).some((name) => name !== "value") || !markerSink || !Number.isInteger(value) || value < 1) {
           throw new Error(`<${MG_VALUE_TAG}> 必须位于 together 标签内且只使用正整数 value`);
         }
-        const startOffset = relativeOffset;
+        const startOffset = articleOffset();
         for (const child of node.childNodes ?? []) walk(child, ancestors, markerSink);
-        const endOffset = relativeOffset;
+        const endOffset = articleOffset();
         const text = textContent(node);
         if (!text.trim()) throw new Error(`<${MG_VALUE_TAG}> 不能包裹空文本`);
         markerSink.push({value, text, startOffset, endOffset});
@@ -300,10 +322,10 @@ const parseStructure = (html: string, articleSource: string): ParsedStructure =>
       const instanceKey = htmlTag && group ? mgProvider.instanceKey({htmlTag, group, order}) : undefined;
       const nextAncestors = instanceKey ? [...ancestors, instanceKey] : ancestors;
       const currentDocumentOrder = isMg ? documentOrder++ : -1;
-      const startOffset = relativeOffset;
+      const startOffset = articleOffset();
       const ownMarkers: Array<{value: number; text: string; startOffset: number; endOffset: number}> = [];
       for (const child of node.childNodes ?? []) walk(child, nextAncestors, isMg ? ownMarkers : markerSink);
-      const endOffset = relativeOffset;
+      const endOffset = articleOffset();
       if (!isMg) return;
 
       const generatedVideo = isGeneratedVideoTag(htmlTag);
