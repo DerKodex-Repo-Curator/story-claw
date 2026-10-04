@@ -3,9 +3,11 @@ import net from "node:net";
 import {Type} from "@sinclair/typebox";
 import type {ToolDefinition} from "@mariozechner/pi-coding-agent";
 import {EnvHttpProxyAgent} from "undici";
+import {translateWebText} from "./web-translation.js";
+import {readWebSnapshot, saveWebSnapshot, webSnapshotPathForUrl} from "./web-snapshot.js";
 
 const require = createRequire(import.meta.url);
-const parse5 = require("parse5") as {parse(input: string): HtmlNode};
+const parse5 = require("parse5") as {parse(input: string): HtmlNode; serialize(input: HtmlNode): string; parseFragment(input: string): HtmlNode};
 
 type HtmlNode = {
   nodeName?: string;
@@ -13,6 +15,7 @@ type HtmlNode = {
   value?: string;
   attrs?: Array<{name: string; value: string}>;
   childNodes?: HtmlNode[];
+  namespaceURI?: string;
 };
 
 const MAX_PAGE_HTML_BYTES = 4_000_000;
@@ -242,26 +245,9 @@ const textBlocks = (root: HtmlNode): string[] => {
 
 /** Preserve the source text inside each block, so a short phrase can be copied verbatim. */
 export const extractReadablePage = (html: string): {title: string; content: string; totalCharacters: number; truncated: boolean; source: string} => {
-  const document = parse5.parse(html);
-  const candidates: Array<{node: HtmlNode; source: string}> = [];
-  const visit = (node: HtmlNode): void => {
-    if (isHiddenNode(node)) return;
-    if (node.tagName === "article") candidates.push({node, source: "article"});
-    else if (nodeAttr(node, "role") === "main" || node.tagName === "main") candidates.push({node, source: "main"});
-    else if (node.tagName === "body") candidates.push({node, source: "body"});
-    for (const child of node.childNodes ?? []) visit(child);
-  };
-  visit(document);
-  const ranked = candidates
-    .map(({node, source}) => ({node, source, blocks: textBlocks(node)}))
-    .sort((left, right) => {
-      const priority = (source: string): number => source === "article" ? 2 : source === "main" ? 1 : 0;
-      return priority(right.source) - priority(left.source)
-        || right.blocks.join("").length - left.blocks.join("").length;
-    });
-  const selected = ranked.find((item) => item.blocks.join("").trim().length >= 80) ?? ranked[0];
-  if (!selected) throw new Error("网页没有可读取的正文");
-  const fullText = selected.blocks.length ? selected.blocks.join("\n\n") : nodeText(selected.node).trim();
+  const {document, selected, source} = findReadableSelection(html);
+  const blocks = textBlocks(selected);
+  const fullText = blocks.length ? blocks.join("\n\n") : nodeText(selected).trim();
   if (fullText.trim().length < 40) throw new Error("网页没有足够的可读取正文；可能需要 JavaScript 或被网站拦截，请换一篇报道");
   const titleNode = ((): HtmlNode | undefined => {
     const find = (node: HtmlNode): HtmlNode | undefined =>
@@ -273,7 +259,7 @@ export const extractReadablePage = (html: string): {title: string; content: stri
     content: fullText.slice(0, MAX_PAGE_TEXT_CHARS),
     totalCharacters: fullText.length,
     truncated: fullText.length > MAX_PAGE_TEXT_CHARS,
-    source: selected.source,
+    source,
   };
 };
 
@@ -328,10 +314,189 @@ const readWebPage = async (inputUrl: string) => {
     if (!/^(?:text\/html|application\/xhtml\+xml)\b/i.test(response.headers.get("content-type") ?? "")) {
       throw new Error("该 URL 没有返回 HTML 网页，请换用报道原文地址");
     }
-    const page = extractReadablePage(await responseHtml(response));
-    return {url, ...page};
+    const html = await responseHtml(response);
+    const page = extractReadablePage(html);
+    return {url, html, ...page};
   }
   throw new Error("网页跳转次数过多");
+};
+
+type ReadableSelection = {
+  document: HtmlNode;
+  selected: HtmlNode;
+  source: string;
+};
+
+const findReadableSelection = (html: string): ReadableSelection => {
+  const document = parse5.parse(html);
+  const candidates: Array<{node: HtmlNode; source: string}> = [];
+  const visit = (node: HtmlNode): void => {
+    if (isHiddenNode(node)) return;
+    if (node.tagName === "article") candidates.push({node, source: "article"});
+    else if (nodeAttr(node, "role") === "main" || node.tagName === "main") candidates.push({node, source: "main"});
+    else if (node.tagName === "body") candidates.push({node, source: "body"});
+    for (const child of node.childNodes ?? []) visit(child);
+  };
+  visit(document);
+  const ranked = candidates
+    .map(({node, source}) => ({node, source, blocks: textBlocks(node)}))
+    .sort((left, right) => {
+      const priority = (source: string): number => source === "article" ? 2 : source === "main" ? 1 : 0;
+      return priority(right.source) - priority(left.source) || right.blocks.join("").length - left.blocks.join("").length;
+    });
+  const selected = ranked.find((item) => item.blocks.join("").trim().length >= 80) ?? ranked[0];
+  if (!selected) throw new Error("网页没有可读取的正文");
+  // Translation changes paragraph lengths; retain the originally selected article.
+  const saved = ranked.find(({node}) => nodeAttr(node, "data-sc-web-content") !== undefined);
+  return {document, selected: (saved ?? selected).node, source: (saved ?? selected).source};
+};
+
+const plainNodeText = (node: HtmlNode): string =>
+  node.nodeName === "#text" ? node.value ?? "" : (node.childNodes ?? []).map(plainNodeText).join("");
+
+const translatableTextNodes = (root: HtmlNode): HtmlNode[] => {
+  const nodes: HtmlNode[] = [];
+  const visit = (node: HtmlNode, blocked: boolean): void => {
+    const hidden = blocked || isHiddenNode(node);
+    if (hidden) return;
+    if (node.nodeName === "#text") {
+      if ((node.value ?? "").trim()) nodes.push(node);
+      return;
+    }
+    for (const child of node.childNodes ?? []) visit(child, hidden);
+  };
+  visit(root, false);
+  return nodes;
+};
+
+const titleTextNodes = (document: HtmlNode): HtmlNode[] => {
+  let title: HtmlNode | undefined;
+  const visit = (node: HtmlNode): void => {
+    if (title || isHiddenNode(node)) return;
+    if (node.tagName === "title") {
+      title = node;
+      return;
+    }
+    for (const child of node.childNodes ?? []) visit(child);
+  };
+  visit(document);
+  return title ? translatableTextNodes(title) : [];
+};
+
+const translationMap = (batches: readonly string[]): Map<number, string> => {
+  const translated = new Map<number, string>();
+  const visit = (node: HtmlNode): void => {
+    const id = nodeAttr(node, "data-sc-id");
+    if (id !== undefined && /^-?\d+$/.test(id)) {
+      translated.set(Number(id), (translated.get(Number(id)) ?? "") + plainNodeText(node));
+    }
+    for (const child of node.childNodes ?? []) visit(child);
+  };
+  for (const batch of batches) visit(parse5.parseFragment(batch));
+  return translated;
+};
+
+const setBaseHref = (document: HtmlNode, url: string): void => {
+  let head: HtmlNode | undefined;
+  const visit = (node: HtmlNode): void => {
+    if (head) return;
+    if (node.tagName === "head") { head = node; return; }
+    for (const child of node.childNodes ?? []) visit(child);
+  };
+  visit(document);
+  if (!head) return;
+  // Snapshots are always written as UTF-8, regardless of the site's original encoding.
+  head.childNodes = (head.childNodes ?? []).filter((node) => node.tagName !== "meta"
+    || (nodeAttr(node, "charset") === undefined && nodeAttr(node, "http-equiv")?.toLowerCase() !== "content-type"));
+  head.childNodes.unshift({nodeName: "meta", tagName: "meta", namespaceURI: "http://www.w3.org/1999/xhtml", attrs: [{name: "charset", value: "utf-8"}], childNodes: []});
+  const existingBase = head.childNodes.find((node) => node.tagName === "base");
+  const baseHref = new URL(nodeAttr(existingBase ?? {}, "href") ?? url, url).href;
+  head.childNodes = head.childNodes.filter((node) => node.tagName !== "base");
+  head.childNodes.splice(1, 0, {nodeName: "base", tagName: "base", namespaceURI: "http://www.w3.org/1999/xhtml", attrs: [{name: "href", value: baseHref}], childNodes: []});
+};
+
+const freezeSnapshot = (node: HtmlNode): void => {
+  // Keep markup, styles and images, but never let the original site replace the saved text.
+  node.childNodes = node.childNodes?.filter((child) => child.tagName !== "script"
+    && !(child.tagName === "meta" && nodeAttr(child, "http-equiv")?.toLowerCase() === "refresh"));
+  node.attrs = node.attrs?.filter(({name}) => !name.startsWith("on") && name !== "data-sc-web-content");
+  for (const child of node.childNodes ?? []) freezeSnapshot(child);
+};
+
+const predominantlyChinese = (value: string): boolean => {
+  const han = (value.match(/[\u3400-\u9fff]/g) ?? []).length;
+  const latin = (value.match(/[A-Za-z]/g) ?? []).length;
+  const other = (value.match(/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Cyrillic}\p{Script=Arabic}]/gu) ?? []).length;
+  return han >= 24 && han >= latin * 0.5 && han >= other * 2;
+};
+
+/** Build the one browser snapshot consumed by the later MG capture stage. */
+export const buildWebSnapshot = async (
+  html: string,
+  finalUrl: string,
+  pageContent: string,
+  translate = translateWebText,
+): Promise<{html: string; content: string}> => {
+  const selection = findReadableSelection(html);
+  const nodes = [...translatableTextNodes(selection.selected), ...titleTextNodes(selection.document)];
+  const needsTranslation = !predominantlyChinese(pageContent) && nodes.length > 0;
+  if (needsTranslation) {
+    const batches = await translate(nodes.map((node, id) => ({id, text: node.value ?? ""})));
+    const values = translationMap(batches);
+    if (values.size !== nodes.length || nodes.some((_, id) => !values.get(id)?.trim())) {
+      throw new Error("网页翻译结果不完整，无法保存快照");
+    }
+    nodes.forEach((node, id) => { node.value = values.get(id)!; });
+  }
+  freezeSnapshot(selection.document);
+  (selection.selected.attrs ??= []).push({name: "data-sc-web-content", value: ""});
+  setBaseHref(selection.document, finalUrl);
+  const snapshotHtml = parse5.serialize(selection.document);
+  const content = extractReadablePage(snapshotHtml).content;
+  if (needsTranslation && !predominantlyChinese(content)) {
+    throw new Error("网页正文未成功翻译成中文，无法保存快照");
+  }
+  return {html: snapshotHtml, content};
+};
+
+// Concurrent reads of the same URL must also reuse the first translation.
+const pendingPageReads = new Map<string, Promise<string>>();
+
+const sharePageRead = (url: string, work: () => Promise<string>): Promise<string> => {
+  const key = webSnapshotPathForUrl(url);
+  const pending = pendingPageReads.get(key);
+  if (pending) return pending;
+  const read = work();
+  pendingPageReads.set(key, read);
+  void read.finally(() => pendingPageReads.delete(key)).catch(() => undefined);
+  return read;
+};
+
+const readFinalPageContent = (inputUrl: string): Promise<string> => {
+  const url = pageUrl(inputUrl);
+  assertReadableSource(url);
+  return sharePageRead(url, async () => {
+    const saved = await readWebSnapshot(url);
+    if (saved) return extractReadablePage(saved).content;
+    const page = await readWebPage(url);
+    const prepare = async (): Promise<string> => {
+      const existing = await readWebSnapshot(page.url);
+      if (existing) return extractReadablePage(existing).content;
+      const snapshot = await buildWebSnapshot(page.html, page.url, page.content);
+      await saveWebSnapshot([page.url], snapshot.html);
+      // Another process may have saved this URL first; return the version capture will use.
+      const persisted = await readWebSnapshot(page.url);
+      if (!persisted) throw new Error("网页快照保存失败");
+      return extractReadablePage(persisted).content;
+    };
+    if (webSnapshotPathForUrl(url) === webSnapshotPathForUrl(page.url)) return prepare();
+    // Redirect aliases share the canonical URL's first translation as well.
+    const content = await sharePageRead(page.url, prepare);
+    const snapshot = await readWebSnapshot(page.url);
+    if (!snapshot) throw new Error("网页快照保存失败");
+    await saveWebSnapshot([url], snapshot);
+    return content;
+  });
 };
 
 const searchDuckDuckGo = async (query: string, maxResults: number): Promise<Array<{title: string; url: string; snippet?: string}>> => {
@@ -383,7 +548,7 @@ const sourceRank = (quality: SourceQuality): number => ({official: 0, "major-med
 export const searchWebTool: ToolDefinition = {
   name: "search_web",
   label: "搜索或读取网页素材",
-  description: "传 query 搜索真实网页，返回标题、摘要、网页截图地址和 og:image；选择报道后再传 url 读取那一页的正文，复制其逐字短语。query 和 url 只能填写一个；无法读取正文时不要将搜索摘要冒充网页原文。仅在当前模板提示词要求网络素材时调用。",
+  description: "传 query 搜索真实网页，返回候选来源；选择报道后再传 url 读取那一页的最终网页正文（非中文网页会先翻译并保存同一份浏览器快照）。query 和 url 只能填写一个；无法读取正文时不要将搜索摘要冒充网页原文。仅在当前模板提示词要求网络素材时调用。",
   parameters: Type.Object({
     query: Type.Optional(Type.String({description: "搜索关键词；与 url 二选一。优先包含当前动画文字和主题上下文"})),
     url: Type.Optional(Type.String({description: "已选中的报道原文 URL；与 query 二选一，用于读取网页正文"})),
@@ -393,14 +558,13 @@ export const searchWebTool: ToolDefinition = {
     const query = args.query?.trim();
     const url = args.url?.trim();
     if (Boolean(query) === Boolean(url)) {
-      return {content: [{type: "text" as const, text: "ERROR: query 和 url 必须二选一"}], details: {}};
+      return {content: [{type: "text" as const, text: "ERROR: query 和 url 必须二选一"}], details: undefined};
     }
     try {
       if (url) {
-        const page = await readWebPage(url);
         return {
-          content: [{type: "text" as const, text: JSON.stringify(page, null, 2)}],
-          details: {url: page.url, totalCharacters: page.totalCharacters, truncated: page.truncated},
+          content: [{type: "text" as const, text: await readFinalPageContent(url)}],
+          details: undefined,
         };
       }
       const maxResults = Math.min(10, Math.max(2, Math.trunc(args.maxResults ?? 6)));
@@ -414,7 +578,7 @@ export const searchWebTool: ToolDefinition = {
         details: {query: searchQuery, count: hits.length},
       };
     } catch (error) {
-      return {content: [{type: "text" as const, text: `ERROR: ${error instanceof Error ? error.message : String(error)}`}], details: {}};
+      return {content: [{type: "text" as const, text: `ERROR: ${error instanceof Error ? error.message : String(error)}`}], details: undefined};
     }
   },
 };

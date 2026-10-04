@@ -5,9 +5,23 @@ import path from "node:path";
 import {pathToFileURL} from "node:url";
 import type {getMgTemplateProvider as ProviderFactory} from "@story-claw/mg-templates/provider";
 
-export const MG_TEMPLATE_PROTOCOL_VERSION = 2;
+export const MG_TEMPLATE_PROTOCOL_VERSION = 3;
 
-type MgTemplateProvider = ReturnType<typeof ProviderFactory>;
+type BaseProvider = ReturnType<typeof ProviderFactory>;
+// v3 adds only a host-owned directory. URL lookup and capture remain in the Provider.
+type MgTemplateProvider = Omit<BaseProvider, "protocolVersion" | "prepareRuntimeAssets"> & {
+  protocolVersion: number;
+  prepareRuntimeAssets(input: Parameters<BaseProvider["prepareRuntimeAssets"]>[0] & {
+    webSnapshotDirectory?: string;
+  }): Promise<void>;
+};
+
+const assertProviderProtocol = (provider: MgTemplateProvider): MgTemplateProvider => {
+  if (Number(provider.protocolVersion) !== MG_TEMPLATE_PROTOCOL_VERSION) {
+    throw new Error(`MG Template Pack Provider 协议不兼容：主程序需要 v${MG_TEMPLATE_PROTOCOL_VERSION}，当前为 v${String(provider.protocolVersion)}。请更新模板包。`);
+  }
+  return provider;
+};
 
 type TemplatePackManifest = {
   name?: string;
@@ -40,7 +54,7 @@ export async function loadMgTemplateProvider(): Promise<MgTemplateProvider> {
     if (!fs.existsSync(manifestPath)) {
       if (process.env.STORY_CLAW_PACKAGED !== "1" || process.env.STORY_CLAW_DEV_TEMPLATES === "1") {
         const module = await import("@story-claw/mg-templates/provider");
-        return module.getMgTemplateProvider();
+        return assertProviderProtocol(module.getMgTemplateProvider());
       }
       throw missingPackError(root);
     }
@@ -64,10 +78,7 @@ export async function loadMgTemplateProvider(): Promise<MgTemplateProvider> {
     const module = await import(`${pathToFileURL(providerPath).href}?v=${encodeURIComponent(String(manifest.version ?? "0"))}`);
     if (typeof module.getMgTemplateProvider !== "function") throw new Error("MG Template Pack 未导出 getMgTemplateProvider()" );
     const provider = module.getMgTemplateProvider() as MgTemplateProvider;
-    if (Number(provider.protocolVersion) !== MG_TEMPLATE_PROTOCOL_VERSION) {
-      throw new Error(`MG Template Pack Provider 协议不兼容：${String(provider.protocolVersion)}`);
-    }
-    return provider;
+    return assertProviderProtocol(provider);
   })().catch((error) => {
     providerPromise = null;
     throw error;

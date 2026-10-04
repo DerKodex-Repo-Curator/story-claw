@@ -9,7 +9,7 @@ import {EnvHttpProxyAgent} from "undici";
 import type {NovelSelection} from "../../ui/select.js";
 import {generateImage} from "../../utils/image-gen.js";
 import {removeSolidBackground as removeSolidBackgroundImage} from "../../utils/remove-solid-background.js";
-import {novelPaths} from "../../utils/paths.js";
+import {novelPaths, PATHS} from "../../utils/paths.js";
 import {assertMgVideoFrames} from "./media.js";
 import type {MgRenderBundle, VisualFunctionRecord} from "./types.js";
 import type {
@@ -270,9 +270,11 @@ const preparePublicAssets = async (
         render: node.render!,
       })),
   ];
+  // The host supplies its storage directory; the provider owns URL lookup and capture.
   await mgProvider.prepareRuntimeAssets({
     layers: runtimeLayers,
     resolveImage: makeImageResolver(baseDir, publicDir, bundleData.width, bundleData.height),
+    webSnapshotDirectory: PATHS.webSnapshots,
     generateImageFromReferences: makeReferenceImageGenerator(baseDir, publicDir),
     removeSolidBackground: makeSolidBackgroundRemover(publicDir),
   });

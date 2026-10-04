@@ -8,7 +8,7 @@ import {
   stripMgAnnotationDecoration,
   validateMgAnnotationHtml,
 } from "./html.js";
-import {compileMgScenes, computeScLongtakeSegmentWindows, selectMgFunctionDefinitions, selectMgPlanningTargets} from "./planner.js";
+import {compileMgScenes, computeScLongtakeSegmentWindows, selectMgFunctionDefinitions, selectMgPlanningTargets, webFocusNeedsPageRead} from "./planner.js";
 import {resolveMgFunctionCall} from "./registry.js";
 import type {LocatedMgTag, MgInstanceInfo, MgMode, MgVideoInfo} from "./types.js";
 
@@ -16,6 +16,17 @@ const article = [
   "谷歌从搜索入口走向AI基础设施。",
   "底层是芯片，中间是模型，上层是应用。",
 ].join("\n\n");
+
+test("web capture retries reread the same URL for bad text, but replace unusable pages", () => {
+  for (const template of ["NEWS", "PAGE"]) {
+    const prefix = `WEB_${template}_FOCUS_CAPTURE_FAILED url=https://www.reuters.com/article `;
+    assert.equal(webFocusNeedsPageRead(new Error(`${prefix}WEB_FOCUS_TEXT_NOT_FOUND 定位文字不存在`)), true);
+    assert.equal(webFocusNeedsPageRead(new Error(`${prefix}WEB_SNAPSHOT_NOT_FOUND 未读取网页`)), true);
+    assert.equal(webFocusNeedsPageRead(new Error(`${prefix}page-too-long`)), false);
+    assert.equal(webFocusNeedsPageRead(new Error(`${prefix}browser launch failed`)), false);
+  }
+  assert.equal(webFocusNeedsPageRead(new Error("unrelated error")), false);
+});
 
 const html = `<!DOCTYPE html>
 <html><body><article>

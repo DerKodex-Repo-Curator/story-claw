@@ -652,6 +652,12 @@ const isWebFocusCaptureFailure = (error: unknown): boolean => {
   return message.includes("WEB_NEWS_FOCUS_CAPTURE_FAILED") || message.includes("WEB_PAGE_FOCUS_CAPTURE_FAILED");
 };
 
+export const webFocusNeedsPageRead = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  return isWebFocusCaptureFailure(error)
+    && /\b(?:WEB_FOCUS_TEXT_NOT_FOUND|WEB_SNAPSHOT_NOT_FOUND)\b/.test(message);
+};
+
 const failedWebFocusUrl = (error: unknown): string | undefined => {
   const message = error instanceof Error ? error.message : String(error);
   return message.match(/WEB_(?:NEWS|PAGE)_FOCUS_CAPTURE_FAILED url=(\S+)/)?.[1];
@@ -1517,16 +1523,19 @@ export async function planEssayMg(sel: NovelSelection, refresh: MgPlanRefreshOpt
         if (isWebFocusTag(call.htmlTag) && isWebFocusCaptureFailure(error)) {
           const rejectedUrl = failedWebFocusUrl(error) ?? String(call.arguments.url ?? "");
           const normalizedRejectedUrl = normalizedWebUrl(rejectedUrl);
-          if (normalizedRejectedUrl) rejectedWebUrls.add(normalizedRejectedUrl);
+          const rereadPage = webFocusNeedsPageRead(error);
+          if (!rereadPage && normalizedRejectedUrl) rejectedWebUrls.add(normalizedRejectedUrl);
           if (webReplans >= WEB_NEWS_REPLAN_MAX_ATTEMPTS) break;
           let replacementAccepted = false;
           const instance = instances.get(record.instanceKey)!;
           while (webReplans < WEB_NEWS_REPLAN_MAX_ATTEMPTS && !replacementAccepted) {
             webReplans++;
-            console.warn(`[视觉任务] ${record.instanceKey} 网页捕获失败，通知主流程重新搜索 (${webReplans}/${WEB_NEWS_REPLAN_MAX_ATTEMPTS}): ${rejectedUrl}`);
-            const rejectedList = [...rejectedWebUrls].join("、") || rejectedUrl;
+            console.warn(`[视觉任务] ${record.instanceKey} ${rereadPage ? "定位文字无效，重新读取快照" : "网页捕获失败，重新搜索"} (${webReplans}/${WEB_NEWS_REPLAN_MAX_ATTEMPTS}): ${rejectedUrl}`);
+            const rejectedList = [...rejectedWebUrls].join("、");
             const nextFunction = call.name;
-            const feedback = `网页重点实例 ${record.instanceKey} 的页面捕获失败。必须调用 search_web({query}) 搜索另一篇可靠来源，再调用 search_web({url}) 读取所选正文。以下 URL 均已被程序拒绝，不能再次使用：${rejectedList}。不能使用 fallback URL、摘要或截图替代。然后仅为此实例重新调用 ${nextFunction}，保留当前时间轴语义并使用新网页正文中的逐字定位短语。`;
+            const feedback = rereadPage
+              ? `网页重点实例 ${record.instanceKey} 的定位文字不正确或尚未读取网页。必须先调用 search_web({url: ${JSON.stringify(rejectedUrl)}}) 重新读取同一份最终正文，再逐字复制其中实际存在的短语，仅重新调用 ${nextFunction}。不需要换网页，不要自行翻译，也不要引用清稿或搜索摘要；保留当前时间轴语义。捕获错误：${message.split("\nChrome:")[0]}`
+              : `网页重点实例 ${record.instanceKey} 的页面捕获失败。必须调用 search_web({query}) 搜索另一篇可靠来源，再调用 search_web({url}) 读取所选正文。以下 URL 均已被程序拒绝，不能再次使用：${rejectedList}。不能使用 fallback URL、摘要或截图替代。然后仅为此实例重新调用 ${nextFunction}，保留当前时间轴语义并使用新网页正文中的逐字定位短语。`;
             try {
               const replanned = await runScope(instance, [instance], timeline, referenceImages, video.duration, feedback);
               const nextCall = replanned[0];
@@ -1564,7 +1573,7 @@ export async function planEssayMg(sel: NovelSelection, refresh: MgPlanRefreshOpt
             } catch (replanError) {
               lastError = replanError;
               const detail = replanError instanceof Error ? replanError.message : String(replanError);
-              await updateRecord(index, "failed", {error: `重新搜索/规划失败（已拒绝 ${rejectedList}）：${detail}`, retries: webReplans});
+              await updateRecord(index, "failed", {error: `重新读取/规划失败${rejectedList ? `（已拒绝 ${rejectedList}）` : ""}：${detail}`, retries: webReplans});
             }
           }
           if (replacementAccepted) continue;

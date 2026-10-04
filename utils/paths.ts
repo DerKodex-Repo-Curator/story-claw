@@ -29,6 +29,9 @@ export const PATHS = {
 
   /** 小说改编中间文件根目录 */
   workspace: path.join(WORK_DIR, "workspace"),
+
+  /** search_web 保存的最终网页；模板按 URL 读取同一份快照 */
+  webSnapshots: path.join(WORK_DIR, "workspace", ".web-snapshots"),
 };
 
 // ── workspace 内的动态路径（函数形式） ─────────────────────────────
