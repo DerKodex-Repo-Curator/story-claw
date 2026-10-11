@@ -41,10 +41,10 @@ const readPage = async (url: string): Promise<string> => {
 
 const prepare = async (template: "web-page-focus" | "web-news-focus", url: string, phrase: string, captureDirectory: string) => {
   const isNews = template === "web-news-focus";
-  const call = provider.resolveCall({
+  const call = provider.resolveCall({timing: {start: 0, end: (0) + 60},
     name: isNews ? "create_web_news_focus" : "create_web_page_focus",
     arguments: {
-      group: "focus", order: null, at: 0, url, entrance: "fade",
+      group: "focus", order: null, url, entrance: "fade",
       [isNews ? "highlights" : "focus"]: [{text: phrase, at: 0}],
     },
   });
@@ -106,8 +106,8 @@ test("real English page is translated once, read back verbatim, and captured by 
     const {FFPROBE_PATH} = await import("../utils/media-binaries.js");
     const {execFile} = await import("node:child_process");
     const {promisify} = await import("node:util");
-    const call = provider.resolveCall({name: "create_web_page_focus", arguments: {
-      group: "focus", order: null, at: 0, url, entrance: "fade", focus: [{text: phrase, at: 0.5}],
+    const call = provider.resolveCall({timing: {start: 0, end: (0) + 60}, name: "create_web_page_focus", arguments: {
+      group: "focus", order: null, url, entrance: "fade", focus: [{text: phrase, at: 0.5}],
     }});
     const videoPath = path.join(outputDirectory, "w3c", "web-page-focus.mp4");
     await renderVisualTagTemplateClip({novelName: "快照集成测试", episode: 1} as never,

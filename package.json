@@ -47,6 +47,7 @@
     "test:mg": "npm test --prefix ../story-claw-templates && tsx --test runner/mg/pipeline.test.ts runner/mg/assembler.integration.test.ts"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^1.1.5",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@ffprobe-installer/ffprobe": "^2.1.2",
     "@google/genai": "^1.41.0",
@@ -65,9 +66,9 @@
     "undici": "^6.28.0"
   },
   "devDependencies": {
+    "@story-claw/mg-templates": "file:../story-claw-templates",
     "@types/react": "^18.3.28",
     "@types/react-dom": "^18.3.7",
-    "@story-claw/mg-templates": "https://github.com/ZC89757/story-claw-templates/archive/8eac44821c8e62a239570d311e8ad70468577c84.tar.gz",
     "electron": "^43.3.0",
     "electron-builder": "^26.0.12",
     "typescript": "^5.9.3"

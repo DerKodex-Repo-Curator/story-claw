@@ -36,7 +36,7 @@ Defined in `runner/pipeline.ts`, orchestrated by `runner/solo.ts`（**唯一模�
 | 全局排序 | `assignGlobalOrder()` | storyboard 完成后、render 前调用。读取 `画面预设.txt` 的原文行序，与各 JSONL group 的 `text` 做子串匹配，为每个 group 写入 `global_order` 字段；未匹配的 group 打印警告日志并置为 999 |
 | 原画渲染 | `renderScene()` | **先逐 group 配音**拿真实音频时长 `d_g`，再以 `d_g` 驱动 panel 视频时长。议论文同时保留字级时间，供整集时间轴使用 |
 | 原画母版 | `buildEpisodeMaster()` | 拼接无声原画为不可覆盖的 `epXX_raw.mp4`，输出对齐音轨、`article_timeline.json` 和全局字幕；此时尚未加入 MG、字幕或音轨 |
-| MG Function Calling（仅议论文） | `planEssayMg()` | 第二次 AI 调用。AI 直接读取完整 HTML 与真实字级时间轴，每个 `group` 恰好调用一次模板函数，并为根及逐步元素填写绝对 `at` |
+| MG Function Calling（仅议论文） | `planEssayMg()` | 第二次 AI 调用。AI 读取已审核 HTML 与真实字级时间轴，每个逻辑实例恰好调用一次模板函数，只为内部元素填写绝对 `at`；宿主统一从标签计算实例 start/end，根参数不接受 `at`、`startTime` 或 `endTime` |
 | MG 渲染（仅议论文） | `renderAndAssembleEssayMg()` | 按 `mode` 编译动画窗口：`together` 连续渲染，`split` 只在节点运动区间显示；支持标题/重点大字嵌套覆盖，输出 `mg/epXX_mg_raw.mp4` |
 | 最终封装 | `finalizeEpisodeMedia()` | 在 MG 原片上烧字幕、合入对齐音轨，再执行议论文 BGM/倍速或故事后处理；绝不修改 `epXX_raw.mp4` |
 

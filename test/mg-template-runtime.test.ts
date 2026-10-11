@@ -12,9 +12,9 @@ test("template loader rejects old manifests and providers before webpage capture
   try {
     await fs.writeFile(path.join(directory, "provider.mjs"), "export const getMgTemplateProvider = () => ({protocolVersion: 2});");
     await fs.writeFile(path.join(directory, "manifest.json"), JSON.stringify({protocolVersion: 2, provider: "provider.mjs"}));
-    await assert.rejects(loadMgTemplateProvider, /主程序需要 v3.*当前为 v2/);
-    await fs.writeFile(path.join(directory, "manifest.json"), JSON.stringify({protocolVersion: 3, provider: "provider.mjs"}));
-    await assert.rejects(loadMgTemplateProvider, /Provider.*主程序需要 v3.*当前为 v2/);
+    await assert.rejects(loadMgTemplateProvider, /主程序需要 v4.*当前为 v2/);
+    await fs.writeFile(path.join(directory, "manifest.json"), JSON.stringify({protocolVersion: 4, provider: "provider.mjs"}));
+    await assert.rejects(loadMgTemplateProvider, /Provider.*主程序需要 v4.*当前为 v2/);
   } finally {
     if (previous === undefined) delete process.env.STORY_CLAW_MG_TEMPLATES_DIR;
     else process.env.STORY_CLAW_MG_TEMPLATES_DIR = previous;

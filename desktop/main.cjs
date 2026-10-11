@@ -141,12 +141,12 @@ function getMgTemplateRuntime() {
     if (fsSync.existsSync(manifestPath) && fsSync.existsSync(providerPath)) {
       mgTemplateRuntimePromise = fs.readFile(manifestPath, "utf8").then(async (content) => {
         const manifest = JSON.parse(content);
-        if (manifest.protocolVersion !== 3) {
-          throw new Error(`MG Template Pack 接口版本不兼容：主程序需要 v3，当前为 v${String(manifest.protocolVersion ?? "未知")}`);
+        if (manifest.protocolVersion !== 4) {
+          throw new Error(`MG Template Pack 接口版本不兼容：主程序需要 v4，当前为 v${String(manifest.protocolVersion ?? "未知")}`);
         }
         const module = await import(`${pathToFileURL(providerPath).href}?v=${encodeURIComponent(String(manifest.version || "0"))}`);
         const provider = module.getMgTemplateProvider();
-        if (Number(provider.protocolVersion) !== 3) throw new Error("MG Template Pack Provider 协议不兼容");
+        if (Number(provider.protocolVersion) !== 4) throw new Error("MG Template Pack Provider 协议不兼容");
         return {packageRoot: mgTemplatePackRoot, provider};
       });
     } else if (!app.isPackaged) {
@@ -155,7 +155,7 @@ function getMgTemplateRuntime() {
       const providerPath = path.join(path.dirname(packageEntry), "provider.ts");
       const {require: tsxRequire} = require("tsx/cjs/api");
       const provider = tsxRequire(providerPath, __filename).getMgTemplateProvider();
-      if (Number(provider.protocolVersion) !== 3) throw new Error("MG Template Pack Provider 协议不兼容：需要 v3，请更新模板包");
+      if (Number(provider.protocolVersion) !== 4) throw new Error("MG Template Pack Provider 协议不兼容：需要 v4，请更新模板包");
       mgTemplateRuntimePromise = Promise.resolve({
         packageRoot,
         provider,
@@ -212,7 +212,7 @@ function assertMgTemplatePackInstalled() {
   }
   try {
     const manifest = JSON.parse(fsSync.readFileSync(manifestPath, "utf8"));
-    if (manifest.protocolVersion !== 3) throw new Error(`需要接口 v3，当前为 v${String(manifest.protocolVersion ?? "未知")}`);
+    if (manifest.protocolVersion !== 4) throw new Error(`需要接口 v4，当前为 v${String(manifest.protocolVersion ?? "未知")}`);
   } catch (error) {
     throw new Error(`MG Template Pack 不兼容或已损坏，请重新安装：${error instanceof Error ? error.message : String(error)}`);
   }

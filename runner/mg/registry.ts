@@ -8,10 +8,13 @@ import type {RawMgFunctionCall, ResolvedMgFunctionCall} from "./types.js";
 
 export const mgProvider = await loadMgTemplateProvider();
 
-export const resolveMgFunctionCall = (call: RawMgFunctionCall): ResolvedMgFunctionCall => {
-  const resolved = mgProvider.resolveCall({name: call.name, arguments: call.arguments});
+export const resolveMgFunctionCall = (
+  call: RawMgFunctionCall,
+  timing: Readonly<{start: number; end: number}>,
+): ResolvedMgFunctionCall => {
+  const resolved = mgProvider.resolveCall({name: call.name, arguments: call.arguments, timing});
   return {...call, ...resolved};
 };
 
-export const elementAts = (call: RawMgFunctionCall): number[] =>
-  mgProvider.resolveCall({name: call.name, arguments: call.arguments}).elementAts;
+export const elementAts = (call: RawMgFunctionCall, timing: Readonly<{start: number; end: number}>): number[] =>
+  mgProvider.resolveCall({name: call.name, arguments: call.arguments, timing}).elementAts;

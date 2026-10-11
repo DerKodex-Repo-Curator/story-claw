@@ -5,10 +5,10 @@ import path from "node:path";
 import {pathToFileURL} from "node:url";
 import type {getMgTemplateProvider as ProviderFactory} from "@story-claw/mg-templates/provider";
 
-export const MG_TEMPLATE_PROTOCOL_VERSION = 3;
+export const MG_TEMPLATE_PROTOCOL_VERSION = 4;
 
 type BaseProvider = ReturnType<typeof ProviderFactory>;
-// v3 adds only a host-owned directory. URL lookup and capture remain in the Provider.
+// v4 supplies annotation timing separately from model-owned Function Call arguments.
 type MgTemplateProvider = Omit<BaseProvider, "protocolVersion" | "prepareRuntimeAssets"> & {
   protocolVersion: number;
   prepareRuntimeAssets(input: Parameters<BaseProvider["prepareRuntimeAssets"]>[0] & {

@@ -8,34 +8,8 @@ import {fileURLToPath} from "node:url";
 import {createRequire} from "node:module";
 import OpenAI from "openai";
 import {resolveMediaCommand} from "../utils/media-binaries.js";
-import {
-  progressTimelineFunctionDefinition,
-  resolveProgressTimelineFunctionArgs,
-} from "../../story-claw-templates/src/progress-timeline/index.js";
-import {
-  resolveTimedTableFunctionArgs,
-  timedTableFunctionDefinition,
-} from "../../story-claw-templates/src/timed-table/index.js";
-import {
-  directedGraphFunctionDefinition,
-  resolveDirectedGraphFunctionArgs,
-} from "../../story-claw-templates/src/directed-graph/index.js";
-import {resolveTitleFunctionArgs, titleFunctionDefinition} from "../../story-claw-templates/src/title/index.js";
-import {emphasisFunctionDefinition, resolveEmphasisFunctionArgs} from "../../story-claw-templates/src/emphasis/index.js";
-import {resolveXYChartFunctionArgs, xyChartFunctionDefinition} from "../../story-claw-templates/src/xy-chart/index.js";
-import {
-  multiSeriesChartFunctionDefinition,
-  resolveMultiSeriesChartFunctionArgs,
-} from "../../story-claw-templates/src/multi-series-chart/index.js";
-import {containmentFunctionDefinition, resolveContainmentFunctionArgs} from "../../story-claw-templates/src/containment/index.js";
-import {decompositionFunctionDefinition, resolveDecompositionFunctionArgs} from "../../story-claw-templates/src/decomposition/index.js";
-import {
-  resolveSideBySideComparisonFunctionArgs,
-  resolveWeightedComparisonFunctionArgs,
-  sideBySideComparisonFunctionDefinition,
-  weightedComparisonFunctionDefinition,
-} from "../../story-claw-templates/src/weighted-comparison/index.js";
-import {collageNetworkFunctionDefinition, resolveCollageNetworkFunctionArgs} from "../../story-claw-templates/src/collage-network/index.js";
+import {getMgTemplateProvider} from "@story-claw/mg-templates/provider";
+const provider = getMgTemplateProvider();
 
 const require = createRequire(import.meta.url);
 const parse5 = require("parse5") as {parse(input: string): HtmlNode};
@@ -176,20 +150,7 @@ const TAG_FUNCTIONS: Record<string, string[]> = {
   emphasis: ["create_emphasis_text_cue"],
 };
 
-const FUNCTION_DEFINITIONS = [
-  progressTimelineFunctionDefinition,
-  timedTableFunctionDefinition,
-  directedGraphFunctionDefinition,
-  titleFunctionDefinition,
-  emphasisFunctionDefinition,
-  xyChartFunctionDefinition,
-  multiSeriesChartFunctionDefinition,
-  containmentFunctionDefinition,
-  decompositionFunctionDefinition,
-  weightedComparisonFunctionDefinition,
-  sideBySideComparisonFunctionDefinition,
-  collageNetworkFunctionDefinition,
-];
+const FUNCTION_DEFINITIONS = provider.getPlanningTools([...MG_TAGS]);
 
 const TEMPLATE_BY_FUNCTION: Record<string, string> = {
   create_progress_timeline: "progress-timeline",
@@ -385,7 +346,7 @@ const requestFunctionCalls = async (
           "你会直接收到第一阶段 AI 输出的完整 HTML 和原始字级时间戳 JSON；不得要求代码先把标签转成结构化事实。",
           "必须为 HTML 中每个不同的 group 恰好调用一次与标签名对应的函数，包括嵌套标签；不得漏组、合并组或为不存在的标签调用函数。",
           "标签映射：progress-timeline→create_progress_timeline；timed-table→create_timed_table；directed-graph→create_directed_graph_timeline；side-by-side-comparison→create_side_by_side_comparison；weighted-comparison→create_weighted_comparison；decomposition→create_decomposition_timeline；xy-chart→create_xy_chart_timeline；multi-series-chart→在 bar/line 两个函数中择一；containment→create_containment_timeline；collage-network→create_collage_network；title→create_title_cue；emphasis→create_emphasis_text_cue。",
-          "所有 at 都必须是整集时间轴的绝对秒数，直接复制对应文字第一个字的 start；禁止输出相对 0 秒。根级 at 必须等于该 group 最早标签文字的 start。",
+          "内部元素 at 必须是整集时间轴的绝对秒数，直接复制对应文字第一个字的 start。实例整体起止由宿主从标签计算，不传根 at、startTime 或 endTime。",
           "每个会逐步出现的节点、单元格、边、组成部分、对比项、关键帧、数据点、实体或关系都必须有自己的 at。表格表头等模型新增元素使用根级 at。",
           "group 必须逐字复制 HTML 属性。mode 只属于 HTML，任何 Function Call 都不得输出 mode。",
           "只填可见语义内容与时间。不要输出 action、motion、progress、detail、kind、assetSrc、chartType、sequence、source 或其他模板样式参数。",
@@ -424,49 +385,23 @@ const requestFunctionCalls = async (
   });
 };
 
-const assetForCollageNode = (node: {id: string; label: string}): string | undefined => {
-  const key = `${node.id} ${node.label}`.toLowerCase();
-  const candidates: Array<[RegExp, string]> = [
-    [/(microsoft|微软)/i, "microsoft.svg"],
-    [/(openai)/i, "openai.svg"],
-    [/(amazon|亚马逊|aws)/i, "amazon.svg"],
-    [/(anthropic)/i, "anthropic.svg"],
-    [/(google|谷歌)/i, "google.svg"],
-    [/(nvidia|英伟达)/i, "nvidia.svg"],
-  ];
-  const match = candidates.find(([pattern]) => pattern.test(key));
-  return match ? `ai-company-logos/${match[1]}` : undefined;
+const resolveOneCall = (call: RawFunctionCall, group: GroupInfo): ResolvedCall => {
+  const resolved = provider.resolveCall({
+    name: call.name,
+    arguments: call.arguments,
+    timing: {start: group.tags[0].start, end: group.tags.at(-1)!.end},
+  });
+  return {...call, group: resolved.group, at: resolved.at, spec: resolved.render.spec, template: TEMPLATE_BY_FUNCTION[call.name]};
 };
 
-const resolveOneCall = (call: RawFunctionCall): ResolvedCall => {
-  const args = call.arguments as any;
-  let resolved: {group: string; at: number; spec: unknown};
-  switch (call.name) {
-    case "create_progress_timeline": resolved = resolveProgressTimelineFunctionArgs(args); break;
-    case "create_timed_table": resolved = resolveTimedTableFunctionArgs(args); break;
-    case "create_directed_graph_timeline": resolved = resolveDirectedGraphFunctionArgs(args); break;
-    case "create_title_cue": resolved = resolveTitleFunctionArgs(args); break;
-    case "create_emphasis_text_cue": resolved = resolveEmphasisFunctionArgs(args); break;
-    case "create_xy_chart_timeline": resolved = resolveXYChartFunctionArgs(args); break;
-    case "create_multi_series_chart": resolved = resolveMultiSeriesChartFunctionArgs(args); break;
-    case "create_containment_timeline": resolved = resolveContainmentFunctionArgs(args); break;
-    case "create_decomposition_timeline": resolved = resolveDecompositionFunctionArgs(args); break;
-    case "create_weighted_comparison": resolved = resolveWeightedComparisonFunctionArgs(args); break;
-    case "create_side_by_side_comparison": resolved = resolveSideBySideComparisonFunctionArgs(args); break;
-    case "create_collage_network": resolved = resolveCollageNetworkFunctionArgs(args, {resolveAsset: assetForCollageNode}); break;
-    default: throw new Error(`未知 Function Call: ${call.name}`);
-  }
-  return {...call, ...resolved, template: TEMPLATE_BY_FUNCTION[call.name]};
-};
-
-const elementAts = (call: RawFunctionCall): number[] => {
+const elementAts = (call: RawFunctionCall, start: number): number[] => {
   const args = call.arguments as any;
   switch (call.name) {
     case "create_progress_timeline": return (args.nodes ?? []).map((item: any) => item.at);
     case "create_timed_table": return (args.cells ?? []).map((item: any) => item.at);
     case "create_directed_graph_timeline": return (args.edges ?? []).map((item: any) => item.at);
     case "create_title_cue":
-    case "create_emphasis_text_cue": return [args.at];
+    case "create_emphasis_text_cue": return [start];
     case "create_xy_chart_timeline": return (args.keyframes ?? []).map((item: any) => item.at);
     case "create_multi_series_chart": return (args.series ?? []).flatMap((series: any) => (series.data ?? []).map((item: any) => item.at));
     case "create_containment_timeline": return [...(args.relations ?? []), ...(args.highlights ?? [])].map((item: any) => item.at);
@@ -503,12 +438,11 @@ const validateAndResolveCalls = (rawCalls: RawFunctionCall[], groups: Map<string
       continue;
     }
     if ("mode" in call.arguments) errors.push(`group ${groupName} 不应在 Function Call 输出 mode`);
-    const rootAt = Number(call.arguments.at);
     const expectedRootAt = group.tags[0].start;
-    if (!Number.isFinite(rootAt) || Math.abs(rootAt - expectedRootAt) > AT_TOLERANCE_SECONDS) {
-      errors.push(`group ${groupName} 根 at=${rootAt}，应接近 ${expectedRootAt}`);
+    if (["at", "startTime", "endTime"].some((field) => field in call.arguments)) {
+      errors.push(`group ${groupName} 整体时间必须由宿主计算`);
     }
-    const ats = elementAts(call).filter(Number.isFinite);
+    const ats = elementAts(call, expectedRootAt).filter(Number.isFinite);
     for (const tag of group.tags) {
       if (!ats.some((at) => Math.abs(at - tag.start) <= AT_TOLERANCE_SECONDS)) {
         errors.push(`group ${groupName} 没有元素 at 对应“${tag.text.slice(0, 24)}”的 ${tag.start}`);
@@ -518,7 +452,7 @@ const validateAndResolveCalls = (rawCalls: RawFunctionCall[], groups: Map<string
       errors.push(`group ${groupName} 存在超出所属段落范围的元素 at`);
     }
     try {
-      resolved.push(resolveOneCall(call));
+      resolved.push(resolveOneCall(call, group));
     } catch (error) {
       errors.push(`group ${groupName} 参数校验失败: ${error instanceof Error ? error.message : String(error)}`);
     }

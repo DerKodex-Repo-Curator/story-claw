@@ -11,6 +11,7 @@ import {generateImage} from "../../utils/image-gen.js";
 import {removeSolidBackground as removeSolidBackgroundImage} from "../../utils/remove-solid-background.js";
 import {novelPaths, PATHS} from "../../utils/paths.js";
 import {assertMgVideoFrames} from "./media.js";
+import {createRuntimeAssetStager} from "./runtime-assets.js";
 import type {MgRenderBundle, VisualFunctionRecord} from "./types.js";
 import type {
   CompositionNode,
@@ -26,6 +27,7 @@ const PROJECT_ROOT = process.env.STORY_CLAW_APP_ROOT?.trim()
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const MODULE_ROOT = PROJECT_ROOT.replace(/app\.asar(?=$|[\\/])/, "app.asar.unpacked");
 const mgProvider = await loadMgTemplateProvider();
+const stageRuntimeAssets = createRuntimeAssetStager((target) => mgProvider.copyRuntimeAssets(target));
 const REMOTION_ENTRY = fileURLToPath(mgProvider.runtimeEntryUrl);
 const fetchDispatcher = new EnvHttpProxyAgent();
 const fetchWithProxy = (input: string | URL, init: RequestInit = {}) =>
@@ -236,7 +238,15 @@ const preparePublicAssets = async (
   publicDir: string,
 ): Promise<void> => {
   await fs.mkdir(publicDir, {recursive: true});
-  await mgProvider.copyRuntimeAssets(publicDir);
+  const footageSources = [
+    ...(bundleData.layers ?? []).map((layer) => layer.render),
+    ...(bundleData.nodes ?? []).map((node) => node.render),
+  ].flatMap((render) => {
+    if (render?.kind !== "video-footage") return [];
+    const source = (render.spec as {source?: unknown})?.source;
+    return typeof source === "string" ? [source] : [];
+  });
+  await stageRuntimeAssets(publicDir, footageSources);
   if (bundleData.baseFile) {
     const basePath = path.join(publicDir, bundleData.baseFile);
     await fs.mkdir(path.dirname(basePath), {recursive: true});
@@ -318,7 +328,9 @@ export async function renderVisualTagTemplateClip(
     nodes: [node],
     transparentBackground: isAlpha,
   };
-  const publicDir = await fs.mkdtemp(path.join(process.env.TEMP ?? process.env.TMP ?? ".", "story-claw-mg-clip-"));
+  const tempRoot = process.env.TEMP ?? process.env.TMP ?? ".";
+  await fs.mkdir(tempRoot, {recursive: true});
+  const publicDir = await fs.mkdtemp(path.join(tempRoot, "story-claw-mg-clip-"));
   try {
     console.log(`[MG渲染] ${instanceKey} 准备素材`);
     await preparePublicAssets(input, novelPaths.episodeDir(sel.novelName, sel.episode), publicDir);
@@ -412,7 +424,7 @@ const compositionSlotsFor = (
   record: VisualFunctionRecord,
   fps: number,
 ): readonly CompositionSlot[] => {
-  const resolved = mgProvider.resolveCall({name: record.name, arguments: record.arguments});
+  const resolved = mgProvider.resolveCall({name: record.name, arguments: record.arguments, timing: record.timing});
   const provider = mgProvider as unknown as Partial<CompositionSlotProvider>;
   if (typeof provider.resolveCompositionSlots !== "function") {
     throw new Error("MG Template Pack 不支持 composition slots，请更新模板包");
@@ -586,7 +598,9 @@ export async function renderEssayMgEpisode(sel: NovelSelection): Promise<string>
   const runtimeInput = buildRuntimeInput(records, renderBundle);
   const nodeCount = runtimeInput.nodes?.length ?? 0;
 
-  const publicDir = await fs.mkdtemp(path.join(process.env.TEMP ?? process.env.TMP ?? ".", "story-claw-mg-"));
+  const tempRoot = process.env.TEMP ?? process.env.TMP ?? ".";
+  await fs.mkdir(tempRoot, {recursive: true});
+  const publicDir = await fs.mkdtemp(path.join(tempRoot, "story-claw-mg-"));
   try {
     await preparePublicAssets(runtimeInput, novelPaths.episodeDir(sel.novelName, sel.episode), publicDir);
     console.log("[MG渲染] 正在打包模板 Provider 运行时...");

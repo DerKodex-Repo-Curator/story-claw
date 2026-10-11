@@ -34,6 +34,20 @@ export const PATHS = {
   webSnapshots: path.join(WORK_DIR, "workspace", ".web-snapshots"),
 };
 
+/**
+ * Disposable MG media is kept outside the durable C: workspace when the
+ * scheduled AI HOT runner sets STORY_CLAW_MG_SCRATCH_DIR.  Leaving the
+ * override unset preserves the normal Story Claw layout for interactive
+ * runs and existing projects.
+ */
+const mgScratchEpisodeDir = (novelName: string, episodeNum: number): string => {
+  const configured = process.env.STORY_CLAW_MG_SCRATCH_DIR?.trim();
+  const episode = `ep${String(episodeNum).padStart(2, "0")}`;
+  return configured
+    ? path.join(path.resolve(configured), novelName, episode)
+    : path.join(PATHS.workspace, novelName, episode, "mg");
+};
+
 // ── workspace 内的动态路径（函数形式） ─────────────────────────────
 export const novelPaths = {
   /** 小说 workspace 根目录：workspace/{名}/ */
@@ -165,22 +179,23 @@ export const novelPaths = {
   mgRenderBundle: (novelName: string, episodeNum: number) =>
     path.join(PATHS.workspace, novelName, `ep${String(episodeNum).padStart(2, "0")}`, "mg", "render_bundle.json"),
 
+  /** Disposable MG media root; durable Function Calls and render bundle stay on C:. */
+  mgScratchDir: (novelName: string, episodeNum: number) =>
+    mgScratchEpisodeDir(novelName, episodeNum),
+
   mgClipsDir: (novelName: string, episodeNum: number) =>
-    path.join(PATHS.workspace, novelName, `ep${String(episodeNum).padStart(2, "0")}`, "mg", "clips"),
+    path.join(mgScratchEpisodeDir(novelName, episodeNum), "clips"),
 
   mgPropsDir: (novelName: string, episodeNum: number) =>
-    path.join(PATHS.workspace, novelName, `ep${String(episodeNum).padStart(2, "0")}`, "mg", "render-props"),
+    path.join(mgScratchEpisodeDir(novelName, episodeNum), "render-props"),
 
   mgNormalizedDir: (novelName: string, episodeNum: number) =>
-    path.join(PATHS.workspace, novelName, `ep${String(episodeNum).padStart(2, "0")}`, "mg", "normalized"),
+    path.join(mgScratchEpisodeDir(novelName, episodeNum), "normalized"),
 
   /** 已插入 MG、仍无音轨/字幕/倍速的原片 */
   episodeMgRawVideo: (novelName: string, episodeNum: number) =>
     path.join(
-      PATHS.workspace,
-      novelName,
-      `ep${String(episodeNum).padStart(2, "0")}`,
-      "mg",
+      mgScratchEpisodeDir(novelName, episodeNum),
       `ep${String(episodeNum).padStart(2, "0")}_mg_raw.mp4`,
     ),
 

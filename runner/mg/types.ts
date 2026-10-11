@@ -107,6 +107,8 @@ export type VisualFunctionRecord = {
   order?: number;
   arguments: Record<string, unknown>;
   status: VisualFunctionStatus;
+  /** Exact HTML origin and unified frame end, kept separately from model arguments. */
+  timing: Readonly<{start: number; end: number}>;
   retries: number;
   start: number;
   end: number;

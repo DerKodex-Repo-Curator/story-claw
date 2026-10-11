@@ -10,6 +10,7 @@ import {
 } from "./html.js";
 import {compileMgScenes, computeScLongtakeSegmentWindows, selectMgFunctionDefinitions, selectMgPlanningTargets, webFocusNeedsPageRead} from "./planner.js";
 import {resolveMgFunctionCall} from "./registry.js";
+import {getMgAnnotationWindow} from "./timing.js";
 import type {LocatedMgTag, MgInstanceInfo, MgMode, MgVideoInfo} from "./types.js";
 
 const article = [
@@ -340,15 +341,14 @@ test("image stack and grid expose the same media contract", () => {
   const args = {
     group: "stack",
     order: null,
-    at: 10,
     title: "报道截图",
     images: [
       {at: 10, image: "https://example.com/one.png"},
       {at: 12, image: "办公室里的网页截图"},
     ],
   };
-  const stack = resolveMgFunctionCall({id: "image-stack", name: "create_image_stack", arguments: args});
-  const grid = resolveMgFunctionCall({id: "image-grid", name: "create_image_grid", arguments: {...args, group: "grid"}});
+  const stack = resolveMgFunctionCall({id: "image-stack", name: "create_image_stack", arguments: args}, {start: 10, end: (10) + 60});
+  const grid = resolveMgFunctionCall({id: "image-grid", name: "create_image_grid", arguments: {...args, group: "grid"}}, {start: 10, end: (10) + 60});
   assert.equal(stack.htmlTag, "image-stack");
   assert.equal(grid.htmlTag, "image-grid");
   assert.deepEqual((stack.render.spec as {images: Array<{at: number}>}).images.map((item) => item.at), [0, 2]);
@@ -366,8 +366,8 @@ test("effect tags remain executable through the provider", () => {
   const effectCall = resolveMgFunctionCall({
     id: "effect-call",
     name: "create_effect_cue",
-    arguments: {group: "scanline-annotate-focus", order: null, at: 0.1, text: "扫描页面", items: [{text: "扫描页面", at: 0.1}]},
-  });
+    arguments: {group: "scanline-annotate-focus", order: null, text: "扫描页面", items: [{text: "扫描页面", at: 0.1}]},
+  }, {start: 0.1, end: (0.1) + 60});
   const scenes = compileMgScenes(
     [effectCall],
     instances,
@@ -419,22 +419,69 @@ const progressCall = resolveMgFunctionCall({
   arguments: {
     group: "horizontal",
     order: null,
-    at: 1,
     title: "谷歌发展时间线",
     nodes: [
       {at: 1, title: "1998年创办"},
       {at: 10, title: "2023年推出Gemini"},
     ],
   },
-});
+}, {start: 1, end: (1) + 60});
 
-test("split windows meet at the next global MG cue", () => {
+test("split preserves each annotated segment and the shared template timeline", () => {
   const instance = makeInstance("split");
   const scenes = compileMgScenes([progressCall], new Map([[instance.instanceKey, instance]]), video);
   assert.equal(scenes.length, 2);
   assert.deepEqual(scenes.map((scene) => scene.startFrame), [25, 250]);
-  assert.equal(scenes[0].endFrame, scenes[1].startFrame);
+  assert.deepEqual(scenes.map((scene) => scene.endFrame), [45, 270]);
   assert.deepEqual(scenes.map((scene) => scene.timelineOffsetFrames), [0, 225]);
+});
+
+test("text-adjacent split segments fill only the pause before the next segment start", () => {
+  const instance = makeInstance("split");
+  instance.tags[0] = {...instance.tags[0], startOffset: 0, endOffset: 6};
+  instance.tags[1] = {...instance.tags[1], startOffset: 6, endOffset: 18};
+  const instances = new Map([[instance.instanceKey, instance]]);
+  assert.deepEqual(getMgAnnotationWindow([instance.tags[0]], instances, video), {startFrame: 25, endFrame: 250});
+  const scenes = compileMgScenes([progressCall], instances, video);
+  assert.deepEqual(scenes.map(({startFrame, endFrame}) => [startFrame, endFrame]), [[25, 250], [250, 270]]);
+});
+
+test("all MG tags share sibling pause and unlabelled-text boundary rules", () => {
+  for (const tagName of ["video-footage", "sc-video", "mg-cutout", "progress-timeline", "emphasis"]) {
+    const first = {...makeTag("together", 1, 1, 1.8), tag: tagName, startOffset: 0, endOffset: 6};
+    const next = {...makeTag("together", 2, 3, 4), tag: "mg-title", instanceKey: "mg-title::scramble::one", startOffset: 6, endOffset: 8};
+    const instances = new Map<string, MgInstanceInfo>([
+      [first.instanceKey, {...makeInstance("together"), tag: tagName, tags: [first]}],
+      [next.instanceKey, {...makeInstance("together"), instanceKey: next.instanceKey, tags: [next]}],
+    ]);
+    assert.equal(getMgAnnotationWindow([first], instances, video).endFrame, 75, tagName);
+    next.startOffset = 7;
+    assert.equal(getMgAnnotationWindow([first], instances, video).endFrame, 45, tagName);
+    next.startOffset = 6;
+    next.parentInstance = "different-parent";
+    assert.equal(getMgAnnotationWindow([first], instances, video).endFrame, 45, tagName);
+  }
+});
+
+test("a nested label keeps its own end and is clipped to the parent's split windows", () => {
+  const parent = makeInstance("split");
+  const childTag: LocatedMgTag = {
+    ...makeTag("together", 1, 1.5, 10.4), tag: "emphasis", group: "scale",
+    instanceKey: "emphasis::scale::one", parentInstance: parent.instanceKey,
+    depth: 1, documentOrder: 1,
+  };
+  const child: MgInstanceInfo = {
+    ...makeInstance("together"), tag: childTag.tag, group: childTag.group,
+    instanceKey: childTag.instanceKey, parentInstance: parent.instanceKey,
+    depth: 1, tags: [childTag],
+  };
+  const call = resolveMgFunctionCall({
+    id: "nested-window", name: "create_emphasis_text_cue",
+    arguments: {group: "scale", order: null, text: "覆盖部分正文"},
+  }, {start: 1.5, end: 10.4});
+  const scenes = compileMgScenes([call], new Map([[parent.instanceKey, parent], [child.instanceKey, child]]), video);
+  assert.deepEqual(scenes.map(({startFrame, endFrame}) => [startFrame, endFrame]), [[38, 45], [250, 260]]);
+  assert.deepEqual(scenes.map(({timelineOffsetFrames}) => timelineOffsetFrames), [0, 212]);
 });
 
 test("together renders one continuous window across all group nodes", () => {
@@ -459,8 +506,8 @@ test("an MG cue near the end never exceeds the raw master frame range", () => {
   const call = resolveMgFunctionCall({
     id: "call-ending",
     name: "create_emphasis_text_cue",
-    arguments: {group: "scale", order: null, at: 19.99, text: "第二次创业"},
-  });
+    arguments: {group: "scale", order: null, text: "第二次创业"},
+  }, {start: 19.99, end: (19.99) + 60});
   const scenes = compileMgScenes([call], new Map([[instance.instanceKey, instance]]), video);
   assert.equal(scenes.length, 1);
   assert.equal(scenes[0].startFrame, 499);
@@ -474,7 +521,6 @@ const cutoutCall = (at = 0) => resolveMgFunctionCall({
   arguments: {
     group: "rise",
     order: null,
-    at,
     source: {
       mode: "transparent",
       image: "https://example.com/cutout.png",
@@ -482,7 +528,7 @@ const cutoutCall = (at = 0) => resolveMgFunctionCall({
       references: [],
     },
   },
-});
+}, {start: at, end: (at) + 60});
 
 const cutoutScenesFor = (source: string, markup: string) => {
   const annotated = `<!DOCTYPE html><html><body><article>${markup}</article></body></html>`;
@@ -502,7 +548,7 @@ test("mg-cutout extends only to a directly adjacent same-level tag", () => {
   );
   assert.equal(scenes.length, 1);
   assert.equal(scenes[0].startFrame, 0);
-  assert.equal(scenes[0].endFrame, 38);
+  assert.equal(scenes[0].endFrame, 3);
 });
 
 test("mg-cutout does not cross untagged prose before the next sibling", () => {
@@ -513,7 +559,7 @@ test("mg-cutout does not cross untagged prose before the next sibling", () => {
       + `<emphasis group="scale" mode="together">乙</emphasis>`,
   );
   assert.equal(scenes.length, 1);
-  assert.equal(scenes[0].endFrame, 38);
+  assert.equal(scenes[0].endFrame, 3);
 });
 
 test("mg-cutout stays within its own tag when there is no following sibling", () => {
@@ -523,7 +569,7 @@ test("mg-cutout stays within its own tag when there is no following sibling", ()
     `<mg-cutout group="rise" mode="together">甲</mg-cutout>乙`,
   );
   assert.equal(scenes.length, 1);
-  assert.equal(scenes[0].endFrame, 38);
+  assert.equal(scenes[0].endFrame, 3);
 });
 
 test("mg-cutout does not extend to a tag under a different parent", () => {
@@ -535,7 +581,7 @@ test("mg-cutout does not extend to a tag under a different parent", () => {
       + `</decomposition><emphasis group="scale" mode="together">乙</emphasis>`,
   );
   assert.equal(scenes.length, 1);
-  assert.equal(scenes[0].endFrame, 38);
+  assert.equal(scenes[0].endFrame, 3);
 });
 
 test("mg-cutout keeps a naturally longer source window", () => {
