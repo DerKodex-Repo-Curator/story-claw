@@ -10,5 +10,5 @@
     "outDir": "dist"
   },
   "include": ["**/*.ts", "**/*.tsx"],
-  "exclude": ["node_modules", "dist", "agent-data", "experiments", "zenmux-doc"]
+  "exclude": ["node_modules", "dist", "build", "out", "agent-data", "experiments", "zenmux-doc"]
 }

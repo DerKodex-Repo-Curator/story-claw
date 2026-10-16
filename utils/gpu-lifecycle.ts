@@ -2,6 +2,7 @@ import {createHash} from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {CONFIG_DIR, WORK_DIR} from "./runtime-paths.js";
+import {getStoryVideoConfig} from "./story-video-config.js";
 
 type GpuConfig = {
   provider?: string;
@@ -105,8 +106,15 @@ const submitHealthCheck = async (baseUrl: string, workflow: JsonObject): Promise
   return typeof result.prompt_id === "string" ? result.prompt_id : null;
 };
 
-/** Wait until the remote render service completes one minimum-size video request. */
-export const waitForRenderService = async (): Promise<void> => {
+/** Check H3 resources, or wait for the original LTX minimum-size video request. */
+export const waitForRenderService = async (mode: "ltx" | "h3" = "ltx"): Promise<void> => {
+  if (mode === "h3") {
+    const {checkH3RenderService} = await import("./h3-video.js");
+    console.log(`[${now()}] GPU 实例已启动，正在检测 H3 渲染服务...`);
+    await checkH3RenderService(getStoryVideoConfig());
+    console.log(`[${now()}] H3 视频生成服务已通过自检`);
+    return;
+  }
   const video = await readJson<VideoConfig>(path.join(CONFIG_DIR, "video_config.json"));
   if (!video.workflow_path) throw new Error("video_config.json 缺少 workflow_path");
   const baseUrl = (video.base_url || "http://127.0.0.1:8188").replace(/\/$/, "");
@@ -172,7 +180,7 @@ export const waitForRenderService = async (): Promise<void> => {
 };
 
 /** Start the configured managed GPU, then verify that its video endpoint works. */
-export const startGpu = async (): Promise<void> => {
+export const startGpu = async (mode: "ltx" | "h3" = "ltx"): Promise<void> => {
   const config = await gpuConfig();
   if (!isExternalProvider(config)) {
     const instanceId = process.env.STORY_CLAW_GPU_INSTANCE || config.instance_id || "";
@@ -200,7 +208,7 @@ export const startGpu = async (): Promise<void> => {
   } else {
     console.log(`[${now()}] GPU provider=${providerName(config)}，跳过云实例启停，仅检测远程服务`);
   }
-  await waitForRenderService();
+  await waitForRenderService(mode);
 };
 
 /** Stop the configured managed GPU. External/manual providers are left untouched. */

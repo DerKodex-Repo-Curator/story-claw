@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-**Story Claw** is an AI-powered pipeline that transforms stories or argumentative articles into short-form videos. Story projects use the original storyboard pipeline; essay projects add an HTML-driven MG planning and rendering phase after the original footage is ready.
+**Story Claw** is an AI-powered pipeline that transforms stories or argumentative articles into short-form videos. Story projects plan textual storyboards, prepare existing character/scene references and generate videos directly with MiniMax H3. Essay projects keep their separate LTX visual-generation and HTML-driven MG pipeline. Story `imagesOnly` still generates static storyboard images.
 
 ## Commands
 
@@ -32,9 +32,9 @@ Defined in `runner/pipeline.ts`, orchestrated by `runner/solo.ts`（**唯一模�
 | 画面预设 | `visualPreset()` | LLM sub-agent 逐句标注【场景\|人物\|景别\|角度\|镜头运动\|光影\|情绪\|语言\|独白】，输出 `画面预设.txt` |
 | 资源建档 | `archive()` | LLM sub-agent 识别角色/场景，输出 `archive-tasks` JSON；代码据此**批量分配音色**（`assignVoices`，写 `voice_map.json`）并调 `generateCharacterTool` / `generateSceneTool` 直接生图（并行） |
 | 剧本分场 | `segment()` | LLM sub-agent 按场景将原文切分为多个 `.md`；sub-agent 的 cwd 设为 `scripts/`，只写裸文件名 `{场景名}.md` |
-| 分镜制作 | `storyboard()` | 每个场景独立 LLM sub-agent，喂入角色名单**与音效库标签清单**，用 `append_group` 工具逐句写入 `storyboards/*.jsonl`；`image_prompt` 用 `[角色名·阶段]` 内联标注人物身份；可选在 group 加 `sfx` 字段标注字级音效（见「音效（SFX）」） |
+| 分镜制作 | `storyboard()` | 每个故事场景独立 LLM sub-agent，喂入角色名单**与音效库标签清单**，用 `append_group` 逐句写入 `storyboards/*.jsonl`；`image_prompt` 用 `[实际参考图文件名去掉.png]` 锁定人物；保留静态构图与动态描述，供 H3 准备 Agent 融合。完整渲染与 `imagesOnly` 使用同一 H3 拆镜上限；可选在 group 加 `sfx` |
 | 全局排序 | `assignGlobalOrder()` | storyboard 完成后、render 前调用。读取 `画面预设.txt` 的原文行序，与各 JSONL group 的 `text` 做子串匹配，为每个 group 写入 `global_order` 字段；未匹配的 group 打印警告日志并置为 999 |
-| 原画渲染 | `renderScene()` | **先逐 group 配音**拿真实音频时长 `d_g`，再以 `d_g` 驱动 panel 视频时长。议论文同时保留字级时间，供整集时间轴使用 |
+| 原画渲染 | `renderScene()` | 故事**先逐 group 配音**拿真实时长 `d_g`，按 24 fps 分配 panel 时间；共享场景空间约定 → 子 Agent 读图、裁剪、复看 → 短英文融合提示词 → H3 多参考图直接生视频，跳过分镜图生图。议论文保留独立 LTX/MG 路径 |
 | 原画母版 | `buildEpisodeMaster()` | 拼接无声原画为不可覆盖的 `epXX_raw.mp4`，输出对齐音轨、`article_timeline.json` 和全局字幕；此时尚未加入 MG、字幕或音轨 |
 | MG Function Calling（仅议论文） | `planEssayMg()` | 第二次 AI 调用。AI 读取已审核 HTML 与真实字级时间轴，每个逻辑实例恰好调用一次模板函数，只为内部元素填写绝对 `at`；宿主统一从标签计算实例 start/end，根参数不接受 `at`、`startTime` 或 `endTime` |
 | MG 渲染（仅议论文） | `renderAndAssembleEssayMg()` | 按 `mode` 编译动画窗口：`together` 连续渲染，`split` 只在节点运动区间显示；支持标题/重点大字嵌套覆盖，输出 `mg/epXX_mg_raw.mp4` |
@@ -52,7 +52,7 @@ Defined in `runner/pipeline.ts`, orchestrated by `runner/solo.ts`（**唯一模�
 Stored in `~/.story-claw/` (not in the repo):
 - `config.json`: LLM provider/model/api_key/base_url
 - `image_gen_config.json`: `{ api_key, model, base_url, api_format? }` — 当前 model 为 `openai/gpt-image-2:openai`，base_url 为 `https://zenmux.ai/api/vertex-ai`；`api_format` 可显式选 `vertex` / `openai`
-- `video_config.json`: ComfyUI base_url、workflow_path、duration、concurrency
+- `video_config.json`: 故事固定 H3，无 `story_backend` 选择。`h3_base_url` 默认 `http://127.0.0.1:8188`，必须是 ComfyUI 原生服务，不能接 LTX wrapper 的 8191；`h3_workflow_path` 留空使用内置 `workflows/minimax-h3-reference-api.json`；`h3_max_duration` 默认 15 秒。可选 `h3_concurrency=1`、`h3_max_retries=2`、`h3_poll_interval_ms=5000`、`h3_timeout_ms=1800000`。原 `base_url`、`workflow_path`、`default_duration`、`concurrency`、轮询/重试参数保留给议论文 LTX/MG，H3 不从这些字段继承服务地址或任务参数。示例见 `video_config.example.json`
 - `tts_config.json`: 豆包语音（火山引擎 语音合成大模型 V3，HTTP Chunked 单向流式）api_key（X-Api-Key）、base_url（`https://openspeech.bytedance.com/api/v3/tts/unidirectional`）、resource_id（`seed-tts-1.0`，决定可用音色版本与计费）、voices（`{voice_type: 性别}` 可分配音色池，key 为豆包 voice_type，**不应包含旁白音**）、narrator_voice（旁白专用 voice_type，独立于 voices 池）、concurrency、assign_character_voice（可选，默认 `true`；设为 `false` 时音色照常分配，但 TTS 合成时全部强制用 narrator_voice，相当于全程旁白音）、sfx_enabled（可选，默认 `true`；关闭后音效全程跳过）、sfx_volume（可选，默认 `0.7`；音效相对人声的音量 0–1）
 - `sfx/`（目录，可选）: 全局音效库，放 `*.mp3`/`*.wav`，**标签 = 去扩展名的文件名**（可含空格，如 `玻璃破碎 心碎时刻`）。增删文件即增删标签，代码无需改（见「音效（SFX）」）
 
@@ -62,6 +62,10 @@ Stored in `~/.story-claw/` (not in the repo):
 - `utils/runtime-paths.ts`: 导出 `CONFIG_DIR`（默认 `~/.story-claw/`）和可由 `STORY_CLAW_WORK_DIR` 覆盖的 `WORK_DIR`
 - `utils/media-binaries.ts`: 统一解析应用内置的 FFmpeg / FFprobe，并兼容 Electron `app.asar.unpacked`
 - `utils/gpu-lifecycle.ts`: 纯 TypeScript CompShare 实例查询、启动、停止、状态轮询及 ComfyUI 轻量自检
+- `utils/story-video-config.ts`: 独立读取故事 H3 配置、定位源码或桌面安装包中的内置 API 工作流
+- `utils/h3-video.ts`: H3 多参考图上传、可选首帧 guide、工作流参数注入、有界重试、下载与 24 fps 时间轴标准化；H3 自检只读节点/模型和服务器必填输入，不提交生成任务。内置 API 从 Comfy-Org 官方 `video_minimax_h3_r2v.json` 默认非 Lightning 分支导出，来源见 `workflows/minimax-h3-reference-api.provenance.json`；保留官方 0.4 MP 分辨率选择器、INT8 视频 VAE、FP32 音频 VAE 与音视频解码/封装。原生音频保存在 `native.mp4`，panel 标准化仍移除原生音轨，最终声音由 TTS 提供
+- `runner/h3-panel-preparer.ts` / `tools/h3-reference-tools.ts`: 共享场景空间约定与逐镜头参考图准备；实际读图、受限裁剪、复看后才允许提交参考图和短英文视频提示词
+- `runner/story-prompt-constraints.ts`: 原分镜规划与 H3 准备共用镜头约束；H3 接收完整 `image_prompt`、`video_prompt` 和连续性上下文，裁剪服务于原镜头，不得重新设计景别、角度或动作。保留原计划合法运镜，包括满足组内可朗读字数条件的小幅拉远；guide 仅适用于同机位局部推近
 - `utils/video-speed.ts`: 无丢帧视频倍速、音轨变速、可选 BGM 混音及结果校验
 - `utils/title-watermark.ts`: 故事标题设计、生图、dominant-color 抠图、标题/署名水印和倍速
 - `utils/progress.ts`: 改编进度读写（`readProgress` / `getEpisodeRecord` / `markStage` / `finalizeEpisode`），记录每集每阶段完成状态
@@ -75,18 +79,27 @@ Stored in `~/.story-claw/` (not in the repo):
 4. `image-gen.ts` 直接从 Node.js 调图像 API，失败重试 3 次，超时 600s
 5. 3 次全败 → `image-gen.ts` 改调 Gemini 图像模型（只试一次）
 
-**路径二：渲染合成**（每个 panel 的分镜静态图）
-1. 分镜制作阶段 LLM sub-agent 已将每个 panel 的 `image_prompt` 写入 `storyboards/*.jsonl`；`image_prompt` 中名单角色用 `[角色名·阶段]` 内联标注身份
-2. `render.ts:renderScene()` 读取 JSONL，所有 panel 通过 `Promise.all` 并行执行（panel 时长由所属 group 的 `d_g` 决定，见「Render Pipeline Detail」）
-3. 每个 panel 独立流程：`selectResources()` → `generateImage()` → `generateVideo()`
+**路径二：故事 `imagesOnly`**（每个 panel 的分镜静态图）
+1. 分镜制作阶段已将每个 panel 的 `image_prompt` 写入 `storyboards/*.jsonl`；名单人物用 `[实际参考图文件名去掉.png]` 锁定身份。故事完整渲染与 `imagesOnly` 使用相同的 H3 拆镜上限
+2. `render.ts:renderScene()` 读取 JSONL；`imagesOnly` 不启动 GPU、TTS 或 H3 视频生成，所有 panel 生成静态图，包括规划为 continuation 的 panel
+3. 每个 panel 独立流程：`selectResources()` → `generateImage()`
    - `selectResources()`：代码主动发 chat.completions。LLM **读 `[角色名·阶段]` 标签锁定身份、从该角色现有图里按阶段挑参考图**，并把整个 `[...]` 替换为 `the person in image N`、把背景替换为 `the background in image N`，返回参考图路径 + 改写后 prompt
    - 候选资源来自 `buildResourceCatalog()`，它**扫 `characters/` 与 `scenes/` 目录**列出所有 `{name}_*.png` / `{loc}*.png`，因此用户手动放入的真人参考图也会被纳入候选
    - `render.ts` 还有兜底：若选择器漏剥离 `[...]`，按是否有参考图替换为 `the person (in image 1)`，避免中文身份词污染生图
-   - `is_continuation=true` 的 panel 跳过生图，等待 `videoEvents` 前驱事件后提取尾帧作为参考
+   - `imagesOnly` 不执行尾帧接续；先生成所有静态图。之后转完整渲染时，H3 重新准备原有角色/场景参考图，不把这些静态分镜图当成必需中间输入
 4. 代码调 `render.ts:generateImage(imgSem, ...)`，由共享 `utils/image-gen.ts` 直接请求图像 API，失败重试 3 次
 5. 3 次全败 → 代码改调 Gemini 图像模型（只试一次）
 
 **两条路径的共同点**：LLM 只负责生成数据，**生图始终由 Node.js 代码直接调用远程 API**，LLM 不直接触发生图。本机生产链路不需要 Python；旧 Python 辅助脚本仅作开发/历史参考，不进入桌面安装包。
+
+**路径三：故事完整渲染**（现有资源直接生成 H3 视频）
+1. 保留分镜 JSONL 的 `image_prompt`、`video_prompt`、`shot_type`、`end_positions` 与 `is_continuation`；它们是镜头计划，不再要求先生成 panel 静态图
+2. 场景准备子 Agent 根据当前场景名、原文、分镜与资源目录选择实际场景源图，调用 `read_reference` 看图，再提交共享空间约定及审核过的场景源图。约定区分图中已有空间事实与本段采用的人物站位、机位侧别；后续 panel 只用这些场景源图
+3. 每个 panel 准备子 Agent 只选择当前入画人物的精确角色参考图。先读源图 → 决定裁剪 → `crop_reference` → 再读裁片 → 自检身份、入画范围、动作需要的部位、场景线索和单一视角。原图已是合格单体可整图使用；四拼/多视图角色资源须裁为单一视角；每源最多三次裁剪
+4. 手部等局部镜头只参考需要的部位和袖口，不带脸或全身；单人镜头不引入画外人物姓名/行为；近景只保留必要场景切片，但机位所需窗、桌、过道线索不能全部裁掉
+5. 所有裁片复看通过后，再写短英文视频提示词；以 `<Picture N>` 标明用途，按共享约束继承原静态构图与动态动作，包括景别、角度、姿态、位置、必要光影/情绪、一个主要动作和原计划合法运镜。裁剪和简化不得改变镜头设计；参考图提供的外貌、服装和风格不重复。禁止新增、移动、复制家具；不加入无关人物/道具、字幕或叠加文字；对白、独白交给 TTS，不送台词原文或画外音解释到 H3
+6. continuation 等待前驱视频完成，提取实际用于剪辑的标准化视频尾帧。子 Agent 必须读此帧；只有同机位局部推近且所需主体/角度已在尾帧里时提交 `guide`，由 H3 独立的 frame-zero guide 输入锁首帧；正反打、换角度或信息不足则提交 `independent`，直接用按需参考图生成
+7. Node.js 上传参考图并提交 H3 API 工作流，不调用图像生成 API。输出原生视频、实际请求、标准化 panel MP4 与独立预览 PNG；参考图审核是生成前审核，不能宣称已自动保证生成视频的越轴/动作质量
 
 **自定义参考图约定**：用户可手动把 `{角色名}_原型.png`（角色）或 `{场景名}.png` / `{场景名}_变体.png`（场景）放进 `characters/` / `scenes/`。`buildResourceCatalog` 扫目录后这些图会作为候选（描述标注为「用户提供的真实参考图」）；`list_resources` 也会在「角色/场景现有图片」段列出每个资源磁盘上现有的 PNG。角色音色以 `_原型.png` 对应的角色为单位分配（见「音色分配」）。
 
@@ -128,8 +141,20 @@ workspace/
         ├── storyboards/
         │   └── storyboard_{sceneName}.jsonl
         ├── render_{sceneName}/
-        │   ├── g{XX}_p{YY}.png   # panel 静态图
-        │   ├── g{XX}_p{YY}.mp4   # panel 视频
+        │   ├── g{XX}_p{YY}.png   # imagesOnly 静态图，H3 完整渲染不要求它
+        │   ├── g{XX}_p{YY}.mp4   # 标准化 H3 panel 视频，24 fps
+        │   ├── g{XX}_p{YY}_preview.png # 从视频抽帧的独立预览，不覆盖静态 PNG
+        │   ├── g{XX}_p{YY}_lastframe.png # continuation 实际前驱尾帧
+        │   ├── story_video_backend.json # 记录已有场景视频来源，防旧 LTX 视频误复用
+        │   ├── h3/
+        │   │   ├── scene_plan.json # 已读场景源图、空间约定及输入哈希
+        │   │   └── g{XX}_p{YY}/
+        │   │       ├── {裁片标识}.png
+        │   │       ├── references.json # 参考图顺序/裁剪/来源哈希/复看结论/续接策略
+        │   │       ├── prompt_en.txt # 实际融合英文提示词
+        │   │       ├── request.json # 实际提交的 H3 API 工作流
+        │   │       ├── native.mp4 # H3 原生生成结果
+        │   │       └── completed.json # panel 完成指纹与视频哈希
         │   ├── g{XX}.mp4         # group 拼接视频
         │   ├── g{XX}_tts.mp3     # 每个 group 的配音（按说话人切分后拼接）
         │   ├── tts_segments/     # group 内各子片段音频 g{XX}_s{YY}.mp3
@@ -156,18 +181,20 @@ Chapter files: `第{N}章 {title}.txt`，放在用户指定的小说文件夹中
 ### Render Pipeline Detail (`runner/render.ts`)
 `renderScene()` 的执行流程（音频驱动视频时长）：
 1. **逐 group 配音**（`runGroupTtsPipeline`，先于视频）：每个 group 由 LLM 按说话人把原文切成有序 `[{text,voice,style}]`（旁白/角色查 `voice_map`，未命中→`narrator_voice`），并行合成子片段（`ttsExecApi`，TTS 信号量限流），拼成 `g{XX}_tts.mp3` 并用 `ffprobe` 量出真实时长 `d_g`；全部组音频按序拼成 `_tts_{sceneName}.mp3`。返回每组 `d_g` 数组。**若该 group 有 `sfx`，子片段合成时开字级时间戳并在拼接前叠入音效（见「音效（SFX）」），子片段时长不变、`d_g` 不受影响。**
-2. **所有 panel 并行**（`Promise.all`）：每个 panel 目标时长 = 所属 group 的 `d_g` 按 panel **分数秒**均分（`distributePanelDurations`，不取整、无地板，取代旧的 `secs_per_char` 估算）
-   - `is_continuation=false`：`selectResources()` + `generateImage()`（imgSem，默认并发 4）
-   - `is_continuation=true`：跳过生图，等待 `videoEvents` 前驱事件，提取尾帧后生视频
-   - 生视频：`generateVideo()`（vidSem，默认并发 6），**duration 传入 `d_g` 派生的分数秒**，调用 ComfyUI LTX i2v workflow（时长→帧数换算见「视频时长控制」）
-3. **group 拼接**（顺序）：按 group 顺序将 panel 视频拼为 group 视频，再拼成 `_video_only.mp4`
+2. **故事 H3 参考准备与视频生成**：`distributeH3PanelDurations` 先将 `d_g` 换成最近的整组 24 fps 帧数，再近似均分给 panels，保证各 panel 帧数之和等于组帧数。实际目标超出 `h3_max_duration` 时在参考准备/视频请求前失败并要求增加分镜
+   - 先用子 Agent 实际读取场景图，建立共享空间/机位侧别约定；逐 panel 读图、裁剪、复看，再编译短英文融合提示词
+   - 普通镜头直接将按需参考图送 H3，不先生成分镜静态图
+   - continuation 等待前驱 `videoEvent`，提取标准化前驱视频尾帧，再由准备子 Agent 审核 `guide` 或 `independent`；前驱失败不得用旧视频伪续接
+   - `generateH3Video()` 使用独立 H3 服务/工作流/并发参数，按 `<Picture N>` 顺序上传；失败有界重试并重新随机种子。原生结果裁成目标帧数的无声 24 fps panel 视频
+   - panel 缓存绑定计划、参考图/源图像素、工作流、时长、画幅与实际视频哈希；完整性失败时停止拼接
+3. **group 拼接**（顺序）：统一 panel 画幅、24 fps 和 SAR，按 panel 顺序拼成 `g{XX}.mp4`；携带对应的 group 音轨和 `global_order` 返回整集合成
 4. **整集母版与最终封装**：`buildEpisodeMaster()` 收集各场景 group，保持视频原速拼成无声母版，只对音频做轻微 `atempo` 对齐。故事由 `globalAlignAndMerge()` 立即调用 `finalizeEpisodeMedia()`；议论文先生成字级时间轴并插入 MG，之后才烧字幕和 mux 音轨。
 
-> 注意：`imagesOnly` 模式（用户在 `/solo` 选「只生分镜图」）会跳过 TTS、生视频、拼接与合并，只产出 panel 静态图，且不推进进度，便于 ComfyUI 未就绪时先出图、之后重跑补视频。
+> 注意：`imagesOnly` 模式仍使用与完整故事相同的 H3 拆镜上限，但跳过 GPU、TTS、H3 参考准备、生视频、拼接与合并，所有 panel 都生成静态图，且不推进章节。切换完整渲染后复用文本分镜与跨集资源，H3 直接参考现有角色/场景资源，不经过已有静态分镜图。
 
 ### GPU 渲染服务端组件：`pipeline_wrapper.py`（可选，独立于本仓库主流程部署）
 
-`pipeline_wrapper.py` + `video_ltx2_3_i2v_PRESUB.json` + `video_ltx2_3_subtitle_remove.json` 是跑在 GPU 渲染服务器上的一个独立 Python HTTP 服务（端口 8191，随 ComfyUI 一起由 supervisord 管理，见 `systemd/story-claw-services.conf`），**不属于本仓库 `runner/render.ts` 的默认路径**——`render.ts` 默认直连 `video_config.json` 的 `base_url`（默认 `http://127.0.0.1:8188`，即 ComfyUI 本身）。把 `base_url` 改成指向这个服务的 8191 端口，`render.ts` 就能在完全不改代码的前提下额外获得质检重试与去字幕能力，因为它对外暴露的 `/prompt`、`/history/{id}` 跟 ComfyUI 原生接口形状一致。
+`pipeline_wrapper.py` + `video_ltx2_3_i2v_PRESUB.json` + `video_ltx2_3_subtitle_remove.json` 是跑在 GPU 渲染服务器上的独立 LTX HTTP 服务（端口 8191，见 `systemd/story-claw-services.conf`），仅可用于保留的议论文 LTX/MG 路径。原 `base_url` 可指向它以获得 LTX 人物 Gate 与去字幕能力。故事 H3 使用独立 `h3_base_url` 连接 ComfyUI 原生服务，不经过 wrapper，不自动获得此处 LTX Gate/去字幕能力。
 
 部署时必须给 ComfyUI 与 `pipeline_wrapper.py` 两个进程设置同一个 `STORY_CLAW_VISION_API_KEY` 环境变量，人物 Gate 与字幕预检都从这里读取视觉模型凭据；不要把密钥写进源码或 supervisor 配置文件。
 
@@ -187,7 +214,14 @@ Chapter files: `第{N}章 {title}.txt`，放在用户指定的小说文件夹中
 
 **Dashboard**（`GET /`，:8191）：任务统计（成功/失败/字幕触发率/平均耗时/P50/P95）、最近 30 条任务详情、实时日志尾、可在线改视觉模型 id 和人物 Gate1/2 的重试阈值（持久化到 `/root/gate_config.json`，重启不丢）。
 
-### 视频时长控制（`tryGenerateVideoComfyUI` / `durationToFrames`）
+### 故事 H3 视频时长控制（`utils/h3-video.ts`）
+- 帧率固定 24 fps；原生帧数为 `17k+5`，当前工作流训练/验证范围为最少 124 帧、最多 362 帧，约 5.17–15.08 秒
+- 目标秒数先向上取能覆盖它的合法原生帧数，短镜头至少生成 124 帧；故事单 panel 目标最多 15 秒，可通过 `h3_max_duration` 设更低上限
+- 原生视频生成后保持运动速度，按 24 fps 裁到目标帧数；异常短尾用末帧补齐，不将整段拉伸变速。最终时长精度是一帧，即约 0.0417 秒，而不是原生生成的 `17/24` 秒栅格
+- group 配音时长先取最近的整组帧数，再分给 panels；全部 panel 目标帧数之和必须等于 group 帧数
+- 文本分镜按同一 H3 上限留出真实 TTS 余量；`imagesOnly` 不改变拆镜上限。真实音频分配后超上限就报错，不能提交一条 18 秒 H3 请求
+
+### 议论文 LTX 视频时长控制（`tryGenerateVideoComfyUI` / `durationToFrames`）
 LTX 帧数必须为 `8k+1`（latent 时间维 8× 压缩，模型架构属性，常量 `LTX_FRAME_STEP=8`），故输出时长按 **`LTX_FRAME_STEP/fps` 的栅格**量化（25fps 时 0.32s/步），**无法精确到 0.1s**。
 - **fps 单一真值**：从 workflow 节点 `320:300` 读取（`getVideoFps`），它同时驱动输出帧率与帧数换算。**改帧率只改这一个节点，代码自动适配，切勿在别处硬编码 fps。**
 - **秒→帧**：`durationToFrames(durSec, fps)` 取最近的 `8k+1` 帧数（`k≥1`），误差 ≤ 半个栅格（25fps 时 ±0.16s）。

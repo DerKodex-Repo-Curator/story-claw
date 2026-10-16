@@ -29,6 +29,11 @@ import {
 } from "./subtitles.js";
 import {hasAudioStream} from "./mg/media.js";
 import {resolveMediaCommand} from "../utils/media-binaries.js";
+import {createHash} from "node:crypto";
+import {getStoryVideoConfig} from "../utils/story-video-config.js";
+import {distributeH3PanelDurations, generateH3Video} from "../utils/h3-video.js";
+import {prepareH3Panel, prepareH3SceneContext} from "./h3-panel-preparer.js";
+import {assertH3Workspace, h3CompletionKey, needsStaticPanel, prepareH3MasterManifest, completeH3MasterManifest} from "./story-render-policy.js";
 
 const execFileAsyncRaw = promisify(execFile);
 const execFileAsync = async (command: string, args: string[], options?: any): Promise<{stdout: string; stderr: string}> => {
@@ -719,6 +724,15 @@ class Semaphore {
 const _globalImgSem = new Semaphore(IMAGE_CONCURRENCY);
 const _globalVidSem = new Semaphore(VIDEO_CONCURRENCY);
 const _globalSelectSem = new Semaphore(SELECT_CONCURRENCY);
+
+async function withSemaphore<T>(semaphore: Semaphore, task: () => Promise<T>): Promise<T> {
+  await semaphore.acquire();
+  try { return await task(); } finally { semaphore.release(); }
+}
+
+async function extractVideoPreview(videoPath: string, previewPath: string): Promise<void> {
+  await execFileAsync("ffmpeg", ["-y", "-i", videoPath, "-frames:v", "1", previewPath]);
+}
 
 
 // ── TTS 管线 ──────────────────────────────────────────────────────────────────
@@ -1691,6 +1705,7 @@ export async function concatPanels(
   gi: number,
   groupVidPath: string,
   aspectRatio: string,
+  fps?: number,
 ): Promise<void> {
   const gtag       = `g${String(gi).padStart(2, "0")}`;
   const listName   = `_concat_${gtag}.txt`;
@@ -1699,7 +1714,7 @@ export async function concatPanels(
   const buildPath  = path.join(outputDir, buildName);
   const backupPath = path.join(outputDir, `_backup_${gtag}.mp4`);
   const [targetW, targetH] = videoSize(aspectRatio);
-  const targetFps = getVideoFps();
+  const targetFps = fps ?? getVideoFps();
   const normalizedVids = panelVids.map((_, pi) =>
     path.join(outputDir, `_normalized_${gtag}_p${String(pi).padStart(2, "0")}.mp4`),
   );
@@ -1778,6 +1793,7 @@ export interface SceneRenderResult {
     ttsPath: string;
     charTimings?: LocalCharTiming[];
     subtitleEvents?: SubtitleEvent[];
+    h3InputFingerprint?: string;
   }>;
   articleTimelinePath?: string;
   globalSubtitlesJsonPath?: string;
@@ -1802,6 +1818,17 @@ export async function renderScene(
   const rawContent    = await fs.readFile(jsonlPath, "utf-8");
   const groups        = parseJsonl(rawContent);
   const fullSceneText = groups.map((g: any) => g.text ?? "").filter(Boolean).join("\n");
+  const storyVideoConfig = !isEssay && !sel.imagesOnly ? getStoryVideoConfig() : undefined;
+  const useH3 = !isEssay && !sel.imagesOnly;
+  let workflowHash = "";
+  if (!isEssay && !sel.imagesOnly) {
+    const backendPath = novelPaths.storyRenderBackend(sel.novelName, ep, sceneName);
+    const existing = await fs.readFile(backendPath, "utf8").then((text) => JSON.parse(text)).catch(() => undefined);
+    const files = await fs.readdir(outputDir);
+    assertH3Workspace(existing?.backend, files.some((name) => /^g\d+(?:_p\d+)?\.mp4$/.test(name)));
+    workflowHash = createHash("sha256").update(await fs.readFile(storyVideoConfig!.workflowPath)).digest("hex");
+    await fs.writeFile(backendPath, `${JSON.stringify({backend: "h3"}, null, 2)}\n`, "utf8");
+  }
   console.log(`\n场景: ${sceneName}，共 ${groups.length} 个 group`);
   console.log(`输出目录: ${outputDir}`);
 
@@ -1834,6 +1861,34 @@ export async function renderScene(
     );
     groupDurations = groupTtsResults.map((result) => result.duration);
   }
+
+  // Decide one shared camera side before independent panel agents start.
+  // Audio-derived targets are checked before spending calls on visual preparation.
+  let spatialContext = "";
+  let h3Catalog = catalog;
+  if (useH3) {
+    for (let gi = 0; gi < groups.length; gi++) {
+      const durations = distributeH3PanelDurations(groupDurations[gi], (groups[gi].panels ?? []).length);
+      if (durations.some((duration) => duration > storyVideoConfig!.maxDuration)) {
+        throw new Error(`[${sceneName}] group ${gi} 的实际配音要求单镜超过 H3 上限 ${storyVideoConfig!.maxDuration}s，请增加该组文字分镜数量后再渲染。`);
+      }
+    }
+    const scenePlan = await withSemaphore(_globalSelectSem, () => prepareH3SceneContext({
+      sceneName, groups, catalog: catalog!, fullSceneText,
+      outputDir: novelPaths.h3SceneDir(sel.novelName, ep, sceneName),
+      planPath: novelPaths.h3ScenePlan(sel.novelName, ep, sceneName),
+    }));
+    spatialContext = scenePlan.spatialContext;
+    const approvedScenes = new Set(scenePlan.sources.map((source) => source.path));
+    h3Catalog = {
+      text: catalog!.text,
+      pathMap: new Map([...catalog!.pathMap].filter(([, file]) =>
+        !/[/\\]scenes[/\\]/i.test(file) || approvedScenes.has(file),
+      )),
+    };
+  }
+
+  const failedPanels = new Map<string, string>();
 
   // ── 视频管线（时长由 d_g 驱动）──
   const videoTask = (async (): Promise<string[]> => {
@@ -1881,7 +1936,9 @@ export async function renderScene(
         const panels      = group.panels ?? [];
         const currentText = group.text ?? "";
         const groupDur    = groupDurations[gi] ?? VIDEO_DEFAULT_DURATION;  // 真实 TTS 时长驱动
-        const panelDurations = distributePanelDurations(groupDur, panels);
+        const panelDurations = sel.imagesOnly ? panels.map(() => VIDEO_DEFAULT_DURATION) : useH3
+          ? distributeH3PanelDurations(groupDur, panels.length)
+          : distributePanelDurations(groupDur, panels);
 
         return panels.map(async (panel: any, pi: number) => {
           const prefix       = `g${String(gi).padStart(2, "0")}_p${String(pi).padStart(2, "0")}`;
@@ -1892,10 +1949,63 @@ export async function renderScene(
           const videoPrompt  = videoPromptMap.get(key)!;
 
           try {
+            if (useH3) {
+              let firstFrame: string | undefined;
+              if (panel.is_continuation === true) {
+                const pg = pi > 0 ? gi : gi - 1;
+                const pp = pi > 0 ? pi - 1 : (groups[pg]?.panels ?? []).length - 1;
+                const prevKey = `${pg},${pp}`;
+                if (!videoEvents.has(prevKey)) throw new Error("续接镜头没有有效前驱");
+                await videoEvents.get(prevKey)!.promise;
+                if (failedPanels.has(prevKey)) throw new Error(`前驱镜头失败：${failedPanels.get(prevKey)}`);
+                const previousVideo = path.join(outputDir, `g${String(pg).padStart(2, "0")}_p${String(pp).padStart(2, "0")}.mp4`);
+                firstFrame = path.join(outputDir, `${prefix}_lastframe.png`);
+                // Always extract from the normalized clip actually used in the edit.
+                if (!await extractLastFrame(previousVideo, firstFrame)) throw new Error("前驱视频尾帧提取失败");
+              }
+              const plan = await withSemaphore(_globalSelectSem, () => prepareH3Panel({
+                panel, catalog: h3Catalog!, currentText, fullSceneText, groupPanelCount: panels.length,
+                prevContext: getPrevCtx(gi, pi),
+                prevEndPositions: gi > 0 ? groups[gi - 1].end_positions ?? null : null,
+                spatialContext, duration, firstFrame,
+                outputDir: novelPaths.h3PanelDir(sel.novelName, ep, sceneName, gi, pi),
+                planPath: novelPaths.h3PanelPlan(sel.novelName, ep, sceneName, gi, pi),
+                promptPath: novelPaths.h3PanelPrompt(sel.novelName, ep, sceneName, gi, pi),
+              }));
+              const completionPath = novelPaths.h3PanelCompletion(sel.novelName, ep, sceneName, gi, pi);
+              const previewPath = novelPaths.panelVideoPreview(sel.novelName, ep, sceneName, gi, pi);
+              const planHash = createHash("sha256").update(JSON.stringify(plan)).digest("hex");
+              const fingerprint = h3CompletionKey(planHash, workflowHash, sel.aspectRatio, duration);
+              const completion = await fs.readFile(completionPath, "utf8").then((text) => JSON.parse(text)).catch(() => undefined);
+              if (completion?.fingerprint === fingerprint && fsSync.existsSync(panelVidPath)) {
+                const videoHash = createHash("sha256").update(await fs.readFile(panelVidPath)).digest("hex");
+                if (completion.videoHash === videoHash) {
+                  if (!fsSync.existsSync(previewPath)) await extractVideoPreview(panelVidPath, previewPath);
+                  console.log(`    [H3] ${prefix} 已完成，复用审核参考与视频`);
+                  return;
+                }
+              }
+              // Invalidate completion before submission so a failed attempt cannot reuse an old clip.
+              await fs.rm(completionPath, {force: true});
+              await generateH3Video({
+                references: plan.references.map((reference) => reference.path),
+                prompt: plan.videoPrompt,
+                firstFrame: plan.continuation.strategy === "guide" ? firstFrame : undefined,
+                outputPath: panelVidPath,
+                nativePath: novelPaths.h3PanelNativeVideo(sel.novelName, ep, sceneName, gi, pi),
+                requestPath: novelPaths.h3PanelRequest(sel.novelName, ep, sceneName, gi, pi),
+                aspectRatio: sel.aspectRatio, duration,
+              }, storyVideoConfig!);
+              await extractVideoPreview(panelVidPath, previewPath);
+              const videoHash = createHash("sha256").update(await fs.readFile(panelVidPath)).digest("hex");
+              await fs.writeFile(completionPath, `${JSON.stringify({backend: "h3", fingerprint, videoHash}, null, 2)}\n`, "utf8");
+              return;
+            }
+
             // ── 生图阶段 ──
             let actualImg: string | null = null;
 
-            if (panel.is_continuation === true) {
+            if (!needsStaticPanel(isEssay, Boolean(sel.imagesOnly), panel.is_continuation === true)) {
               console.log(`  [${sceneName}][${prefix}] is_continuation，跳过生图`);
             } else if (fsSync.existsSync(imgPath)) {
               console.log(`  [${sceneName}][${prefix}] 图片已存在，跳过生图`);
@@ -1973,6 +2083,7 @@ export async function renderScene(
 
             await generateVideo(vidSem, actualImg, videoPrompt, panelVidPath, sel.aspectRatio, duration);
           } catch (e) {
+            failedPanels.set(key, String(e));
             console.log(`    [${prefix}] 失败: ${e}`);
           } finally {
             videoEvents.get(key)?.resolve();
@@ -1988,7 +2099,7 @@ export async function renderScene(
         const panels = groups[gi].panels ?? [];
         for (let pi = 0; pi < panels.length; pi++) {
           // continuation panel 按设计跳过静态图，直接用前一视频尾帧生成视频。
-          if (extension === "png" && panels[pi].is_continuation === true) continue;
+          if (extension === "png" && !needsStaticPanel(isEssay, Boolean(sel.imagesOnly), panels[pi].is_continuation === true)) continue;
           const filename = `g${String(gi).padStart(2, "0")}_p${String(pi).padStart(2, "0")}.${extension}`;
           if (!fsSync.existsSync(path.join(outputDir, filename))) missing.push(filename);
         }
@@ -1996,6 +2107,9 @@ export async function renderScene(
       return missing;
     };
 
+    if (useH3 && failedPanels.size) {
+      throw new Error(`[${sceneName}] H3 镜头失败，停止拼接：${[...failedPanels].map(([key, message]) => `${key}: ${message}`).join("；")}`);
+    }
     const missingImages = findMissingPanels("png");
     if (missingImages.length > 0) {
       throw new Error(`[${sceneName}] panel 图片不完整，停止渲染：${missingImages.join(", ")}`);
@@ -2017,10 +2131,12 @@ export async function renderScene(
       const panels       = groups[gi].panels ?? [];
       const groupVidPath = path.join(outputDir, `g${String(gi).padStart(2, "0")}.mp4`);
 
-      if (fsSync.existsSync(groupVidPath)) {
+      // Rebuild H3 groups even when all panels are cached: a previous failed pass
+      // may have completed new panels without reaching the group concat stage.
+      if (!useH3 && fsSync.existsSync(groupVidPath)) {
         const [targetW, targetH] = videoSize(sel.aspectRatio);
         const dims = await probeVideoDims(groupVidPath);
-        if (dims.width === targetW && dims.height === targetH && dims.sar === "1:1") {
+        if (dims.width === targetW && dims.height === targetH && dims.sar === "1:1" && (!useH3 || dims.fps === storyVideoConfig!.fps)) {
           console.log(`\n[group ${String(gi).padStart(2, "0")}] 视频已存在，跳过`);
           groupVideos.push(groupVidPath);
           onProgress?.({ scene: sceneName, done: gi + 1, total: groups.length });
@@ -2042,7 +2158,7 @@ export async function renderScene(
         continue;
       }
 
-      await concatPanels(panelVids, outputDir, gi, groupVidPath, sel.aspectRatio);
+      await concatPanels(panelVids, outputDir, gi, groupVidPath, sel.aspectRatio, useH3 ? storyVideoConfig!.fps : undefined);
       console.log(`  拼接完成: ${path.basename(groupVidPath)}`);
       groupVideos.push(groupVidPath);
       onProgress?.({ scene: sceneName, done: gi + 1, total: groups.length });
@@ -2065,12 +2181,21 @@ export async function renderScene(
     const globalOrder = groups[gi].global_order ?? gi;
 
     if (videoPath && fsSync.existsSync(videoPath) && fsSync.existsSync(ttsPath)) {
+      let h3InputFingerprint: string | undefined;
+      if (useH3) {
+        const panelCompletions = await Promise.all((groups[gi].panels ?? []).map((_: any, pi: number) =>
+          fs.readFile(novelPaths.h3PanelCompletion(sel.novelName, ep, sceneName, gi, pi), "utf8").then(text => JSON.parse(text)),
+        ));
+        const ttsHash = createHash("sha256").update(await fs.readFile(ttsPath)).digest("hex");
+        h3InputFingerprint = createHash("sha256").update(JSON.stringify({panelCompletions, ttsHash})).digest("hex");
+      }
       resultGroups.push({
         globalOrder,
         videoPath,
         ttsPath,
         charTimings: groupTtsResults[gi]?.charTimings,
         subtitleEvents: groupTtsResults[gi]?.subtitleEvents,
+        ...(useH3 ? {h3InputFingerprint} : {}),
       });
     }
   }
@@ -2443,7 +2568,17 @@ export async function globalAlignAndMerge(
   rawVideoPath = path.join(epDir, "_raw_master.mp4"),
 ): Promise<void> {
   const alignedAudioPath = path.join(epDir, "_aligned_audio.wav");
+  const storyGroups = results.flatMap(result => result.groups).sort((a, b) => a.globalOrder - b.globalOrder);
+  const hasH3Inputs = storyGroups.some(group => group.h3InputFingerprint);
+  let masterFingerprint: string | undefined;
+  const manifestPath = novelPaths.storyMasterManifest(rawVideoPath);
+  if (hasH3Inputs) {
+    if (!storyGroups.every(group => group.h3InputFingerprint)) throw new Error("H3 母版输入混入其他视频结果，停止合成。");
+    masterFingerprint = createHash("sha256").update(JSON.stringify(storyGroups.map(group => ({globalOrder: group.globalOrder, fingerprint: group.h3InputFingerprint})))).digest("hex");
+    await prepareH3MasterManifest(rawVideoPath, manifestPath, masterFingerprint);
+  }
   const master = await buildEpisodeMaster(results, epDir, rawVideoPath, alignedAudioPath);
+  if (masterFingerprint) await completeH3MasterManifest(rawVideoPath, manifestPath, masterFingerprint);
   await finalizeEpisodeMedia(
     master.rawVideoPath,
     master.alignedAudioPath,

@@ -332,7 +332,7 @@ export async function runSolo(sel: NovelSelection, onPhase?: SoloPhaseReporter):
         });
         console.log(`\n  正在启动 GPU；实例启动后会自动等待渲染服务预热...`);
         gpuStarted = true;
-        await startManagedGpu();
+        await startManagedGpu("h3");
         console.log(`  GPU 实例已就绪\n`);
         reportPhase({ phase: "gpu_ready", label: "GPU 已就绪", detail: "渲染资源已准备完成" });
       }
@@ -354,7 +354,9 @@ export async function runSolo(sel: NovelSelection, onPhase?: SoloPhaseReporter):
         } catch { /* storyboards/ 目录不存在则跳过 */ }
 
         const renderProgress: Record<string, RenderProgress> = {};
-        const sceneResults: SceneRenderResult[] = await Promise.all(
+        // A failed preparation must not shut down the shared GPU while another
+        // scene is still submitting or awaiting its video tasks.
+        const sceneOutcomes = await Promise.allSettled(
           jsonlFiles.map((sceneName) => renderScene(sel, sceneName, (rp) => {
             renderProgress[sceneName] = rp;
             reportPhase({
@@ -369,6 +371,13 @@ export async function runSolo(sel: NovelSelection, onPhase?: SoloPhaseReporter):
             );
           }, false)),
         );
+        const sceneFailures = sceneOutcomes.filter((result) => result.status === "rejected");
+        if (sceneFailures.length) {
+          throw new AggregateError(sceneFailures.map((result) => result.reason), "故事场景渲染失败，全部任务已收尾");
+        }
+        const sceneResults: SceneRenderResult[] = sceneOutcomes
+          .filter((result) => result.status === "fulfilled")
+          .map((result) => result.value);
         p.done(progressIndex.render, title, `${jsonlFiles.length} 个场景`);
 
         if (!sel.imagesOnly) {

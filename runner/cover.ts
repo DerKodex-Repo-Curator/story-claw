@@ -102,7 +102,10 @@ async function buildStoryCandidates(sel: NovelSelection): Promise<CoverCandidate
         const panel = panels[pi];
         if (panel?.is_continuation === true) continue;
         const prefix = `g${String(gi).padStart(2, "0")}_p${String(pi).padStart(2, "0")}.png`;
-        const imagePath = path.join(novelPaths.renderDir(sel.novelName, sel.episode, sceneName), prefix);
+        const previewPath = novelPaths.panelVideoPreview(sel.novelName, sel.episode, sceneName, gi, pi);
+        const imagePath = fsSync.existsSync(previewPath)
+          ? previewPath
+          : path.join(novelPaths.renderDir(sel.novelName, sel.episode, sceneName), prefix);
         if (!fsSync.existsSync(imagePath)) continue;
         candidates.push({
           id: `P${String(candidates.length + 1).padStart(3, "0")}`,

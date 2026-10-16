@@ -211,6 +211,31 @@ export const novelPaths = {
   renderDir: (novelName: string, episodeNum: number, sceneName: string) =>
     path.join(PATHS.workspace, novelName, `ep${String(episodeNum).padStart(2, "0")}`, `render_${sceneName}`),
 
+  /** H3 preparation is separate from static storyboard PNGs. */
+  h3SceneDir: (novelName: string, episodeNum: number, sceneName: string): string =>
+    path.join(novelPaths.renderDir(novelName, episodeNum, sceneName), "h3"),
+  h3ScenePlan: (novelName: string, episodeNum: number, sceneName: string): string =>
+    path.join(novelPaths.h3SceneDir(novelName, episodeNum, sceneName), "scene_plan.json"),
+  h3PanelDir: (novelName: string, episodeNum: number, sceneName: string, group: number, panel: number): string =>
+    path.join(novelPaths.h3SceneDir(novelName, episodeNum, sceneName), `g${String(group).padStart(2, "0")}_p${String(panel).padStart(2, "0")}`),
+  h3PanelPlan: (novelName: string, episodeNum: number, sceneName: string, group: number, panel: number): string =>
+    path.join(novelPaths.h3PanelDir(novelName, episodeNum, sceneName, group, panel), "references.json"),
+  h3PanelPrompt: (novelName: string, episodeNum: number, sceneName: string, group: number, panel: number): string =>
+    path.join(novelPaths.h3PanelDir(novelName, episodeNum, sceneName, group, panel), "prompt_en.txt"),
+  h3PanelNativeVideo: (novelName: string, episodeNum: number, sceneName: string, group: number, panel: number): string =>
+    path.join(novelPaths.h3PanelDir(novelName, episodeNum, sceneName, group, panel), "native.mp4"),
+  h3PanelRequest: (novelName: string, episodeNum: number, sceneName: string, group: number, panel: number): string =>
+    path.join(novelPaths.h3PanelDir(novelName, episodeNum, sceneName, group, panel), "request.json"),
+  h3PanelCompletion: (novelName: string, episodeNum: number, sceneName: string, group: number, panel: number): string =>
+    path.join(novelPaths.h3PanelDir(novelName, episodeNum, sceneName, group, panel), "completed.json"),
+  h3ReferenceFile: (outputDir: string, id: string) => path.join(outputDir, `${id}.png`),
+  h3AgentSession: (outputDir: string, id: string) => path.join(outputDir, `agent_${id}.jsonl`),
+  storyMasterManifest: (rawVideoPath: string) => `${rawVideoPath}.h3.json`,
+  storyRenderBackend: (novelName: string, episodeNum: number, sceneName: string): string =>
+    path.join(novelPaths.renderDir(novelName, episodeNum, sceneName), "story_video_backend.json"),
+  panelVideoPreview: (novelName: string, episodeNum: number, sceneName: string, group: number, panel: number) =>
+    path.join(novelPaths.renderDir(novelName, episodeNum, sceneName), `g${String(group).padStart(2, "0")}_p${String(panel).padStart(2, "0")}_preview.png`),
+
   /** 字幕重建测试目录：workspace/{名}/ep{XX}/subtitle_rebuild/ */
   subtitleRebuildDir: (novelName: string, episodeNum: number) =>
     path.join(PATHS.workspace, novelName, `ep${String(episodeNum).padStart(2, "0")}`, "subtitle_rebuild"),

@@ -124,7 +124,7 @@ export async function ensureSetup(): Promise<boolean> {
       const baseUrl = await ask(rl, "  base_url (如 https://zenmux.ai/api/vertex-ai): ");
       if (!baseUrl) { console.log("  base_url 不能为空，中止。"); return false; }
 
-      const config = {
+      const config: Record<string, string | number | string[]> = {
         api_key: apiKey,
         base_url: baseUrl,
         models: [
@@ -132,9 +132,30 @@ export async function ensureSetup(): Promise<boolean> {
           "bytedance/doubao-seedance-1.5-pro",
           "google/veo-3.1-generate-001",
         ],
+        h3_max_duration: 15,
         default_duration: 4,
         concurrency: 4,
       };
+      console.log("  故事使用 H3；服务地址须为 ComfyUI 原生地址，不能使用 LTX 处理服务的 8191 端口。\n");
+      const h3BaseUrl = await ask(rl, "  H3 服务地址 (回车使用 http://127.0.0.1:8188): ") || "http://127.0.0.1:8188";
+      let h3Endpoint: URL;
+      try { h3Endpoint = new URL(h3BaseUrl); } catch {
+        console.log("  H3 服务地址无效，中止。");
+        return false;
+      }
+      if (!["http:", "https:"].includes(h3Endpoint.protocol) || h3Endpoint.port === "8191") {
+        console.log("  H3 须使用 HTTP/HTTPS 的 ComfyUI 原生服务地址，不能使用 8191 端口，中止。");
+        return false;
+      }
+      const h3WorkflowPath = await ask(rl, "  H3 工作流路径 (回车使用内置工作流): ");
+      const h3MaxDuration = Number(await ask(rl, "  H3 单段上限 (0.1–15 秒，回车使用 15): ") || "15");
+      if (!Number.isFinite(h3MaxDuration) || h3MaxDuration < 0.1 || h3MaxDuration > 15) {
+        console.log("  H3 单段上限必须在 0.1–15 秒之间，中止。");
+        return false;
+      }
+      config.h3_base_url = h3BaseUrl;
+      config.h3_workflow_path = h3WorkflowPath;
+      config.h3_max_duration = h3MaxDuration;
       await fs.writeFile(VIDEO_CONFIG_FILE, JSON.stringify(config, null, 2) + "\n", "utf-8");
       console.log(`  已保存: ${VIDEO_CONFIG_FILE}\n`);
     }

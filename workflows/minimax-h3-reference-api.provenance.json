@@ -1,0 +1,53 @@
+{
+  "source": {
+    "repository": "https://github.com/Comfy-Org/workflow_templates",
+    "commit": "8120a42aa18a96ea6d2403d12c31516962e9ec0a",
+    "files": [
+      {
+        "name": "video_minimax_h3_i2v.json",
+        "url": "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/8120a42aa18a96ea6d2403d12c31516962e9ec0a/templates/video_minimax_h3_i2v.json",
+        "sha256": "34ee39544808fd3b0dc8de9df082940d4d41c3771beb80d3988c1ea5531cec0d"
+      },
+      {
+        "name": "video_minimax_h3_r2v.json",
+        "url": "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/8120a42aa18a96ea6d2403d12c31516962e9ec0a/templates/video_minimax_h3_r2v.json",
+        "sha256": "afeea99e9fd5a1456df348e0573e289c1243f2f28546fc95c1c963f808d61ddb"
+      }
+    ]
+  },
+  "api_derivation": {
+    "template": "video_minimax_h3_r2v.json",
+    "branch": "default, Lightning disabled",
+    "preserved": [
+      "ref2va model",
+      "INT8 video VAE",
+      "FP32 audio VAE",
+      "Qwen NVFP4 AWQ encoder",
+      "res_multistep",
+      "simple/20 steps/denoise 1",
+      "joint audio/video decoding",
+      "24 fps",
+      "0.4MP ResolutionSelector",
+      "ref_image_size=match"
+    ],
+    "runtime_inputs": [
+      "references",
+      "prompt",
+      "aspect_ratio",
+      "17k+5 length",
+      "seed",
+      "output prefix"
+    ],
+    "ui_only_removed": [
+      "notes",
+      "example prompt/images",
+      "duration widget/math (code supplies legal length)",
+      "disabled Lightning branch"
+    ]
+  },
+  "huggingface_video_vae": {
+    "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+    "size": 2811065184,
+    "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+  }
+}

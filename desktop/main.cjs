@@ -68,6 +68,9 @@ const SYSTEM_CONFIG_SECTIONS = Object.freeze({
     fields: {
       base_url: { type: "string", maxLength: 2048 },
       workflow_path: { type: "string", maxLength: 2048 },
+      h3_base_url: { type: "string", maxLength: 2048, rawComfyUi: true },
+      h3_workflow_path: { type: "string", maxLength: 2048 },
+      h3_max_duration: { type: "number", min: 0.1, max: 15, default: 15 },
       default_duration: { type: "number", min: 0.1, max: 3600 },
       concurrency: { type: "integer", min: 1 },
       poll_interval_ms: { type: "integer", min: 100, max: 600000 },
@@ -549,6 +552,16 @@ function systemConfigValue(fieldName, rule, value) {
     const result = value.trim();
     if (!result) return { remove: true };
     if (result.length > rule.maxLength) throw new Error(`${fieldName} 内容过长`);
+    if (rule.rawComfyUi) {
+      let endpoint;
+      try { endpoint = new URL(result); } catch { throw new Error("H3 服务地址必须是有效的 HTTP 或 HTTPS 地址"); }
+      if (!["http:", "https:"].includes(endpoint.protocol)) {
+        throw new Error("H3 服务地址必须使用 HTTP 或 HTTPS");
+      }
+      if (endpoint.port === "8191") {
+        throw new Error("H3 请使用 ComfyUI 原生服务地址，不能使用 LTX 处理服务的 8191 端口");
+      }
+    }
     return { value: result };
   }
   if (rule.type === "boolean") {
@@ -588,8 +601,9 @@ async function readSystemConfig() {
     const filePath = path.join(userConfigRoot, descriptor.fileName);
     const { exists, value } = await readSystemConfigObject(filePath);
     const values = {};
-    for (const fieldName of Object.keys(descriptor.fields)) {
+    for (const [fieldName, rule] of Object.entries(descriptor.fields)) {
       if (Object.prototype.hasOwnProperty.call(value, fieldName)) values[fieldName] = value[fieldName];
+      else if (Object.prototype.hasOwnProperty.call(rule, "default")) values[fieldName] = rule.default;
     }
     sections[sectionName] = { fileName: descriptor.fileName, exists, values };
   }
@@ -1017,7 +1031,10 @@ async function getEpisodePreview(novelName, episode) {
     const renderDir = path.join(episodeDir, `render_${group.sceneName}`);
     for (let panelIndex = 0; panelIndex < group.panels.length; panelIndex++) {
       const stem = `g${String(group.groupIndex).padStart(2, "0")}_p${String(panelIndex).padStart(2, "0")}`;
-      const imagePath = path.join(renderDir, `${stem}.png`);
+      const previewPath = path.join(renderDir, `${stem}_preview.png`);
+      const imagePath = fsSync.existsSync(previewPath) && isWithin(episodeDir, previewPath)
+        ? previewPath
+        : path.join(renderDir, `${stem}.png`);
       const videoPath = path.join(renderDir, `${stem}.mp4`);
       const imageReady = fsSync.existsSync(imagePath) && isWithin(episodeDir, imagePath);
       const videoReady = fsSync.existsSync(videoPath) && isWithin(episodeDir, videoPath);

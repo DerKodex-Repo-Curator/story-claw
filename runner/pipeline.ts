@@ -18,6 +18,8 @@ import { writeTool } from "@mariozechner/pi-coding-agent";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { novelPaths } from "../utils/paths.js";
 import type { NovelSelection } from "../ui/select.js";
+import {getStoryVideoConfig} from "../utils/story-video-config.js";
+import {STORY_PANEL_VISUAL_RULES, STORY_CAMERA_MOTION_RULES} from "./story-prompt-constraints.js";
 
 import { listResourcesTool } from "../tools/list-resources.js";
 import { resourceDetailTool } from "../tools/resource-detail.js";
@@ -221,6 +223,8 @@ const STORYBOARD_SYSTEM = `你是分镜导演。任务：为一个场景的完�
 剧本中每句话对应一个 group。注意：剧本某一行可能因极短句已并入相邻句而含多个句终标点，这种行**整行作为一个 group**，不要再按标点拆成两个 group。
 每个 group 内有一个或多个 panel（分镜），每个 panel 代表原文时间线上的一个时刻。
 
+${STORY_PANEL_VISUAL_RULES}
+
 == 【】画面预设说明 ==
 
 剧本每句话后的【】块格式：场景 | 人物 | 景别 | 角度 | 镜头运动 | 光影 | 情绪 | 语言 | 独白
@@ -230,9 +234,7 @@ const STORYBOARD_SYSTEM = `你是分镜导演。任务：为一个场景的完�
 - 人物：出现角色的位置与动作 → image_prompt 中人物姿态的参考
 - 景别：远景/全景/中景/近景/特写 → panel 的 shot_type，决定画面中人物与背景的比例
 - 角度：拍摄角度（平视/俯视/仰视等）→ image_prompt 中的镜头角度描述
-- 镜头运动：只能是「固定」或「推（push/zoom in）」 → video_prompt 中的镜头运动方式
-  （视频模型只能生成「固定」与「推」两种镜头运动，所有 panel 二选一）
-  例外：当某组的「组字数 ÷ panel数 ≥ 14」（即该 panel 时长足够长）时，该组 panel 的镜头运动可选用「缓慢、小幅度的拉镜（slow, slight pull / gentle zoom out）」；拉镜幅度必须小，只轻微拉远。其余情况仍只用固定/推
+- 镜头运动：${STORY_CAMERA_MOTION_RULES} → video_prompt 中的镜头运动方式
 - 光影：光源、氛围、明暗 → image_prompt 中的光线描述
 - 情绪：角色情绪状态 → image_prompt 中表情/肢体语言，video_prompt 中情绪节奏
 - 语言：角色说出的台词（"无"则忽略）→ video_prompt 中描述说话动作（语气节奏与台词内容匹配）
@@ -838,6 +840,10 @@ export async function storyboard(
   articleType: ArticleType = "story",
 ): Promise<void> {
   const isEssay = articleType === "essay";
+  // H3 story panels need shorter slots; leave room for real TTS versus text estimates.
+  const maxPanelSeconds = !isEssay
+    ? getStoryVideoConfig().maxDuration * 0.8
+    : MAX_PANEL_SECONDS;
   const files = (await fs.readdir(scriptsDir)).filter((f) => f.endsWith(".md"));
   if (isEssay) files.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
@@ -918,15 +924,15 @@ export async function storyboard(
           // 若单 panel 超过 20s（TTS 实测时长驱动的视频时长过长，接近/超出视频模型单次生成上限），
           // 拒绝写入，提示至少需要多少个 panel，让 agent 在同一句上重新拆分后再提交。
           const groupText = String(parsed?.text ?? "");
-          const timingText = isEssay ? groupText.replace(/【[^】]*】/g, "") : groupText;
+          const timingText = groupText.replace(/【[^】]*】/g, "");
           const panelCount = Array.isArray(parsed?.panels) ? parsed.panels.length : 0;
           const estSeconds = timingText.length / CHARS_PER_SECOND;
-          const minPanels = Math.max(1, Math.ceil(estSeconds / MAX_PANEL_SECONDS));
+          const minPanels = Math.max(1, Math.ceil(estSeconds / maxPanelSeconds));
           if (panelCount < minPanels) {
             return {
               content: [{
                 type: "text" as const,
-                text: `ERROR: group 中 panel 太少。该 group 可朗读原文约 ${timingText.length} 字，按 ${CHARS_PER_SECOND} 字/秒估算配音时长约 ${estSeconds.toFixed(1)} 秒；单 panel 时长上限 ${MAX_PANEL_SECONDS} 秒，因此这个 group 至少需要 ${minPanels} 个 panel（当前只有 ${panelCount} 个）。请保持 text 不变，在内容表达合理的前提下把 panel 数拆到至少 ${minPanels} 个并尽量平均，重新调用 append_group。`,
+                text: `ERROR: group 中 panel 太少。该 group 可朗读原文约 ${timingText.length} 字，按 ${CHARS_PER_SECOND} 字/秒估算配音时长约 ${estSeconds.toFixed(1)} 秒；单 panel 预计时长上限 ${maxPanelSeconds} 秒，因此这个 group 至少需要 ${minPanels} 个 panel（当前只有 ${panelCount} 个）。请保持 text 不变，在内容表达合理的前提下把 panel 数拆到至少 ${minPanels} 个并尽量平均，重新调用 append_group。`,
               }],
               details: {},
             };

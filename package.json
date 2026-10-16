@@ -28,11 +28,13 @@
     "tools/",
     "ui/",
     "utils/",
+    "workflows/",
     "desktop/",
     "agent.ts",
     "cli.ts",
     "config.example.json",
-    "image_gen_config.example.json"
+    "image_gen_config.example.json",
+    "video_config.example.json"
   ],
   "scripts": {
     "start": "node --import tsx --disable-warning=MaxListenersExceededWarning cli.ts",

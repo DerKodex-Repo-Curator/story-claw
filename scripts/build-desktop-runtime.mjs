@@ -4,6 +4,7 @@ import sharp from "sharp";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
 const runtimeRoot = path.join(projectRoot, "build", "runtime");
+await fs.cp(path.join(projectRoot, "workflows"), path.join(runtimeRoot, "workflows"), {recursive: true});
 
 const iconSource = path.join(projectRoot, "assets", "branding", "storyclaw-logo-v6-ui.png");
 const iconPng = await sharp(iconSource).resize(256, 256, {fit: "contain"}).png().toBuffer();

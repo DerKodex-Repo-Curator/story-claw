@@ -1166,7 +1166,11 @@ export async function planEssayMg(sel: NovelSelection, refresh: MgPlanRefreshOpt
   if (targetedRefresh) {
     const unknown = [...forcedRenderKeys].filter((key) => !instances.has(key));
     if (unknown.length) throw new Error(`定向重跑找不到实例: ${unknown.join(", ")}`);
-    if (previousByInstance.size !== instances.size) throw new Error("定向重跑需要完整的旧 Function Call 记录");
+    const missingCacheKeys = [...instances.keys()].filter((key) => !previousByInstance.has(key) && !replanInstanceKeys.has(key));
+    const removedCacheKeys = [...previousByInstance.keys()].filter((key) => !instances.has(key));
+    if (missingCacheKeys.length || removedCacheKeys.length) {
+      throw new Error(`定向重跑需要完整的未修改实例缓存: missing=${missingCacheKeys.join(", ")}; removed=${removedCacheKeys.join(", ")}`);
+    }
     const generatedVideoKeys = [...forcedRenderKeys].filter((key) => isGeneratedVideoTag(instances.get(key)?.tag));
     if (generatedVideoKeys.length) throw new Error(`定向 MG 重跑不能重新生成图生视频: ${generatedVideoKeys.join(", ")}`);
   }
@@ -1219,9 +1223,9 @@ export async function planEssayMg(sel: NovelSelection, refresh: MgPlanRefreshOpt
 
   if (targetedRefresh) {
     for (const instance of instances.values()) {
+      if (replanInstanceKeys.has(instance.instanceKey)) continue;
       const previous = previousByInstance.get(instance.instanceKey);
       if (!previous) throw new Error(`定向重跑缺少 ${instance.instanceKey} 的旧 Function Call`);
-      if (replanInstanceKeys.has(instance.instanceKey)) continue;
       const call = resolveAnnotatedCall({id: previous.id, name: previous.name, arguments: previous.arguments}, instances, video);
       validateResolvedCall(call, instance, video.duration);
       const current = describeTask(call, instance, instances, video, windowCache, referenceImageHashes);

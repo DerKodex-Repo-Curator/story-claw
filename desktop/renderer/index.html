@@ -1326,10 +1326,16 @@
           </section>
 
           <section class="claw-system-pane" data-claw-system-pane="video" hidden>
-            <div class="claw-system-pane-head"><h3>视频渲染</h3><p>ComfyUI 服务、工作流和任务轮询参数。</p></div>
+            <div class="claw-system-pane-head"><h3>视频渲染</h3><p>故事使用 H3，参考图直接生成视频；议论文使用 LTX。</p></div>
             <div class="claw-system-grid">
-              <label class="claw-system-field is-wide"><span>服务地址</span><input data-system-field="video.base_url" type="url" autocomplete="off"></label>
-              <label class="claw-system-field is-wide"><span>工作流路径</span><input data-system-field="video.workflow_path" autocomplete="off"></label>
+              <h4 class="claw-system-subhead">LTX（议论文）</h4>
+              <label class="claw-system-field is-wide"><span>LTX 服务地址</span><input data-system-field="video.base_url" type="url" autocomplete="off"></label>
+              <label class="claw-system-field is-wide"><span>LTX 工作流路径</span><input data-system-field="video.workflow_path" autocomplete="off"></label>
+              <h4 class="claw-system-subhead">H3（仅故事）</h4>
+              <label class="claw-system-field is-wide"><span>H3 服务地址（ComfyUI 原生服务）</span><input data-system-field="video.h3_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:8188" title="使用 ComfyUI 原生服务地址，不使用 LTX 处理服务的 8191 端口。"></label>
+              <label class="claw-system-field is-wide"><span>H3 工作流路径</span><input data-system-field="video.h3_workflow_path" autocomplete="off" placeholder="留空使用内置工作流"></label>
+              <label class="claw-system-field"><span>H3 单段上限（秒）</span><input data-system-field="video.h3_max_duration" type="number" min="0.1" max="15" step="0.1" placeholder="15"></label>
+              <h4 class="claw-system-subhead">LTX 任务设置（议论文）</h4>
               <label class="claw-system-field"><span>默认时长（秒）</span><input data-system-field="video.default_duration" type="number" min="0.1" step="0.1"></label>
               <label class="claw-system-field"><span>并发数</span><input data-system-field="video.concurrency" type="number" min="1" step="1"></label>
               <label class="claw-system-field"><span>轮询间隔（毫秒）</span><input data-system-field="video.poll_interval_ms" type="number" min="100" step="100"></label>
